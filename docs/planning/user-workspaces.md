@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27. Issue: [#3](https://github.com/joalceco/mddiff/issues/3). Rama: `feature/multiuser-sources`.
 
-Este documento registra el estado al terminar S02. La integración posterior de autenticación en el producto se describe en [S03: autenticación web alojada](hosted-auth.md).
+Este documento registra el estado al terminar S02. La integración posterior de autenticación en el producto se describe en [S03: autenticación web alojada](hosted-auth.md); la entrada de propuestas mediante Bearer y MCP remoto, en [S06: agentes remotos](remote-agents.md).
 
 ## Resultado
 

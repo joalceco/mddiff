@@ -39,6 +39,8 @@ jobs:
         run: python3 scripts/test_hosted_persistence.py
       - name: Test hosted text and Markdown imports in Chromium
         run: python3 scripts/test_hosted_imports.py
+      - name: Test hosted API and MCP over verified HTTPS
+        run: python3 scripts/test_hosted_mcp.py
       - name: Remove synthetic Keycloak
         if: always()
         run: python3 spikes/identity/keycloak.py down

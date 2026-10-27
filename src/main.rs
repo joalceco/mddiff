@@ -22,6 +22,7 @@ use rmcp::schemars;
 use serde::Deserialize;
 use std::{convert::Infallible, env, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CONTENT_BODY_LIMIT: usize = 24 * 1024 * 1024 + 16 * 1024;
 
 enum Mode {
     Local(Arc<LocalReader>),
@@ -96,7 +97,10 @@ fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(
 }
 
 fn require_json_body(method: &Method, headers: &HeaderMap) -> Result<(), AppError> {
-    if matches!(*method, Method::POST | Method::PUT | Method::DELETE) {
+    if matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
         let content_type = headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
@@ -187,6 +191,26 @@ struct ReplaceWork {
 #[serde(deny_unknown_fields)]
 struct ClearWork {
     expected_revision: u64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposeRequest {
+    expected_revision: u64,
+    candidate: Document,
+}
+
+async fn propose_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    payload: Result<Json<ProposeRequest>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let input = json_payload(payload)?;
+    app.workspace(identity)
+        .await?
+        .propose_if_revision(input.expected_revision, input.candidate)
+        .await
+        .map(Json)
 }
 
 async fn get_work(
@@ -331,13 +355,15 @@ fn router(app: Arc<App>) -> Router {
             "/api/work",
             get(get_work)
                 .put(replace_work)
+                .patch(propose_work)
                 .delete(clear_work)
-                .layer(DefaultBodyLimit::max(24 * 1024 * 1024 + 16 * 1024)),
+                .layer(DefaultBodyLimit::max(CONTENT_BODY_LIMIT)),
         ),
     };
     let router = if app.auth.is_some() {
         router
             .merge(auth::routes())
+            .route("/mcp", axum::routing::any(mcp::hosted_service))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&app),
                 auth::authenticate,

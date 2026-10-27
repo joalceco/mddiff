@@ -243,7 +243,8 @@ def main():
                 anonymous = Browser(base, runtime["issuer"])
                 spoofed = {"X-User-Id": runtime["users"]["alice"]["id"], "Authorization": "Bearer synthetic-invalid"}
                 check(request(anonymous, headers=spoofed)[0] == 401, "Untrusted headers gained access to persisted work.")
-                status, raw = request(alice, headers=spoofed, path="/api/work?" + urlencode({"owner_id": runtime["users"]["bob"]["id"]}))
+                check(request(alice, headers=spoofed)[0] == 403, "An invalid bearer token fell back to a browser cookie.")
+                status, raw = request(alice, headers={"X-User-Id": runtime["users"]["bob"]["id"]}, path="/api/work?" + urlencode({"owner_id": runtime["users"]["bob"]["id"]}))
                 check(status == 200 and json.loads(raw) == work(alice), "An untrusted owner identifier selected another person's work.")
                 commit(alice, 1, replacement, None, headers={"Origin": base, "X-CSRF-Token": csrf, "X-User-Id": runtime["users"]["bob"]["id"]})
                 alice_events.revision(2)

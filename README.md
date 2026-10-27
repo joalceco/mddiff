@@ -19,7 +19,7 @@ El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están
 | Detalle de cambios | Fondo rojo o verde por bloque, signos `−` y `+`, y un highlight más intenso en las palabras modificadas. |
 | Vista de fuente | Markdown exacto, rangos de líneas y fragmentos de sintaxis modificados. |
 | Entradas alojadas | Pegar texto o subir `.md` desde las cabeceras; apertura y comparación automáticas. |
-| Integración | Herramienta MCP `open_comparison` y API HTTP local. |
+| Integración | MCP/API local por rutas y MCP/API alojados con OAuth de usuario. |
 | Actualización de la vista | SSE avisa al navegador cuando otra solicitud abre un documento o una comparación. |
 | Navegación | Botones y atajos `J` / `K` para recorrer los cambios. |
 | Tema | Oscuro de forma predeterminada, con selector de tema y preferencia guardada en el navegador. |
@@ -115,9 +115,9 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. El MCP alojado y los conectores Jira/Memos siguen pendientes; la API de trabajo utiliza la sesión web y CSRF, sin un token de agente añadido por la importación manual.
+Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario; los conectores Jira/Memos siguen pendientes.
 
-Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [la persistencia y API del trabajo actual](docs/planning/current-work.md), [la autenticación alojada](docs/planning/hosted-auth.md) y [la separación de modos y estado](docs/planning/user-workspaces.md).
+Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
 
 ## Usar el visor
 
@@ -169,7 +169,9 @@ No se identifican movimientos de párrafos como una operación distinta. Las lis
 
 ## Usar desde Codex con MCP
 
-En modo local, el endpoint es `http://127.0.0.1:3847/mcp`. Usa **Streamable HTTP** con el SDK Rust `rmcp`; comparte proceso, estado y validación de archivos con la API. El MCP alojado no está habilitado por la integración de autenticación web.
+Ambos modos usan **Streamable HTTP** con el SDK Rust `rmcp`. En modo local, el endpoint es `http://127.0.0.1:3847/mcp` y abre archivos dentro de `--root`. En hosted, el endpoint utiliza el origen HTTPS configurado, OAuth y el espacio privado del usuario; sus herramientas reciben contenido, sin rutas del host.
+
+### Comparar archivos en modo local
 
 1. Inicia mddiff con la raíz que contiene tus dos documentos y mantén el proceso en ejecución.
 2. Registra el servidor una vez en Codex:
@@ -208,6 +210,14 @@ Ambos campos son obligatorios. No se admiten propiedades adicionales. Las rutas 
 En caso de éxito, `structuredContent` contiene `viewer_url`, `base_path`, `candidate_path`, `revision`, `added_blocks`, `removed_blocks`, `source_equal` y `processing_ms`. Los errores de apertura se devuelven como resultado MCP con `isError: true`; los argumentos que incumplen el esquema pueden producir un error de protocolo. En ambos casos se conserva la comparación anterior.
 
 La herramienta cambia el estado del visor y no escribe archivos. No necesita autenticación ni credenciales; está limitada al servidor local. Otros clientes compatibles con Streamable HTTP pueden usar la misma URL y herramienta.
+
+### Enviar una propuesta en hosted
+
+Configura un cliente público prerregistrado en Keycloak con PKCE `S256`, scope `mddiff:compare` y audiencia igual a la URI HTTPS de `/mcp`. Codex solicita `openid`, `profile` y `mddiff:compare`; el callback del procedimiento probado es `http://127.0.0.1:43210/callback`. La [guía de agentes remotos](docs/planning/remote-agents.md#configurar-codex) incluye el TOML y el login OAuth.
+
+El agente llama a `get_current_work` con `{}` y conserva la revisión recibida. Después llama a `submit_proposal` con `{expected_revision, candidate:{label, markdown}}`. Esa operación conserva el original, actualiza el visor por SSE y devuelve `viewer_url`; requiere un original ya abierto. Si recibe `409`, debe detenerse y comunicar el conflicto.
+
+MCP alojado no admite cookies de sesión, rutas, propietarios elegidos por el cliente ni un `Mcp-Session-Id`. Sus errores de operación devuelven `isError: true` con `structuredContent.status` y `error`. No mezcles Bearer y cookie ni uses credenciales Jira/Memos como token de mddiff. Consulta [el prompt de uso](docs/planning/remote-agents.md#prompt-de-uso).
 
 ## API HTTP
 
@@ -257,9 +267,10 @@ Los POST locales requieren `Content-Type: application/json` y rechazan campos de
 | --- | --- |
 | `GET /api/work` | Lee `{revision, base, candidate}` con el contenido actual de la persona autenticada. |
 | `PUT /api/work` | Reemplaza el trabajo con `{expected_revision, base, candidate}`. Cada documento contiene `label` y `markdown`; la propuesta puede ser `null`. |
+| `PATCH /api/work` | Envía `{expected_revision, candidate}` para sustituir solo la propuesta y conservar el original. Requiere un original ya abierto. |
 | `DELETE /api/work` | Borra ambos lados usando `{expected_revision}`; mantiene el contador incrementado. |
 
-PUT y DELETE requieren una sesión admitida, Origin exacto y su token CSRF. Devuelven un snapshot como `/api/state`; un conflicto de revisión devuelve `409` y no sobrescribe el trabajo. Un fallo de almacenamiento devuelve `503` y conserva el último estado publicado.
+Las mutaciones por sesión web requieren admisión, Origin exacto y su token CSRF. Los agentes pueden usar Bearer OAuth para GET, PUT y PATCH; DELETE con Bearer devuelve `403`. No se mezclan ambas credenciales. Las mutaciones devuelven un snapshot como `/api/state`; un conflicto de revisión devuelve `409` sin sobrescribir el trabajo. Un fallo de almacenamiento devuelve `503` y conserva el último estado publicado. Véase [el contrato para agentes](docs/planning/remote-agents.md#api-para-agentes).
 
 Cada documento admite 2 MiB y cada etiqueta, entre 1 y 255 bytes UTF-8 sin caracteres de control. La petición de `/api/work` admite 24 MiB + 16 KiB para los escapes de JSON; este margen no amplía el tamaño de cada documento. Consulta [los ejemplos de revisión y recuperación](docs/planning/current-work.md#ejemplo-de-revisión-esperada).
 
@@ -298,6 +309,8 @@ Los errores de apertura de la API usan un cuerpo como `{"error":"El archivo debe
 En modo local, el visor lee archivos y mantiene la comparación en memoria. No guarda documentos, no incorpora llamadas a modelos ni envía contenido a servicios de análisis. El tema es la única preferencia que la interfaz escribe en `localStorage`. Reiniciar el servidor elimina su estado en memoria; puedes abrir de nuevo los archivos o indicarlos al arrancar.
 
 En hosted, SQLite conserva únicamente el trabajo actual por persona: original, propuesta, etiquetas y revisión. El HTML y el diff se recalculan al recuperarlo. Las sesiones y tokens del IdP permanecen en memoria en el backend y no se exponen al navegador. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO ni borra el trabajo persistente.
+
+El cliente remoto obtiene su propio token OAuth para mddiff. El backend lo verifica mediante introspección en cada solicitud, con emisor, sujeto, audiencia, scope y admisión; no almacenes ese Bearer en ejemplos, logs públicos o el repositorio. Las herramientas comparten únicamente el espacio de la identidad verificada y tratan el Markdown como datos del documento.
 
 El archivo OIDC y el directorio de datos deben permanecer fuera del checkout, con permisos privados. La base guarda el Markdown en claro; los permisos no equivalen a cifrado. Borrar elimina el contenido recuperable por la aplicación, pero WAL, copias, snapshots y el SSD pueden conservar bytes anteriores. No se crean backups automáticos ni se ha fijado una retención: esa política debe cerrarse antes del despliegue público. Consulta [los límites del borrado y las copias](docs/planning/current-work.md#borrado-funcional-copias-y-retención).
 
@@ -406,6 +419,8 @@ Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_
 
 GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`.
 
+La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos y la evidencia local del 2026-10-27](docs/planning/remote-agents.md#reproducir-la-verificación); no se atribuye una corrida remota de CI.
+
 ### Pruebas de importación en navegador
 
 Node.js 20 o posterior con npm y Chromium se necesitan únicamente para las pruebas de desarrollo; no se añaden como requisitos del binario o del despliegue.
@@ -492,6 +507,8 @@ Estas cifras describen esos documentos y ese equipo. No son una garantía para r
 | No se puede guardar el trabajo | Comprueba permisos, espacio disponible y que una sola instancia use la base. Conserva el directorio de datos y no borres sus WAL/SHM para evitar el error. |
 | Una ruta relativa no se encuentra | Se resuelve respecto de `--root`, no respecto del navegador o del agente. |
 | Codex no encuentra `open_comparison` | Comprueba que mddiff esté iniciado, que `/mcp` use el mismo puerto y vuelve a conectar MCP o inicia una sesión nueva. |
+| Codex alojado no puede usar las herramientas | Revisa OAuth, admisión, scope, audiencia y callback exacto. En hosted las herramientas son `get_current_work` y `submit_proposal`; `open_comparison` pertenece al modo local. |
+| Una propuesta de agente devuelve `409` | Comprueba si falta original o cambió la revisión. Detén el envío y revisa el trabajo; no actualices automáticamente `expected_revision` para forzarlo. |
 | El documento cambió en disco y la vista sigue igual | Pulsa **Recargar** o repite la llamada de apertura. |
 | Aparece **Reconectando…** | Revisa el proceso del servidor. El navegador intentará reconectar; al reiniciar tendrás que abrir de nuevo los documentos si no los pasaste por CLI. |
 | **Probar con un ejemplo** falla | La raíz debe contener `examples/base.md` y `examples/propuesta.md`. |

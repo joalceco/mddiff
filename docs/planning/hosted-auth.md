@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27. Issue: [#4](https://github.com/joalceco/mddiff/issues/4). Rama: `feature/multiuser-sources`.
 
-Este documento registra la entrega S03. S04 incorpora persistencia y exige también `--data-dir`; consulta [el trabajo actual y su borrado](current-work.md) para el contrato vigente. Las sesiones OIDC siguen en memoria.
+Este documento registra la entrega S03. S04 incorpora persistencia y exige también `--data-dir`; consulta [el trabajo actual y su borrado](current-work.md) para el contrato vigente. [S06: agentes remotos](remote-agents.md) incorpora Bearer y MCP alojado sobre esta autenticación. Las sesiones OIDC siguen en memoria.
 
 ## Resultado y alcance
 

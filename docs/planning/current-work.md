@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Rama: `feature/multiuser-sources`.
 
+Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente.
+
 ## Resultado y alcance
 
 El modo hosted conserva en SQLite el último original y su propuesta para cada identidad verificada. El trabajo sobrevive al cierre del navegador y al reinicio del proceso. Sustituirlo reemplaza el contenido vigente; no crea una biblioteca ni versiones recuperables.

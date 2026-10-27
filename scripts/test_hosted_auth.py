@@ -206,7 +206,8 @@ def web_client(runtime, base):
 def test_anonymous(base):
     for path in ["/auth/session", "/api/state", "/api/events"]:
         for suffix, headers in [("", {}), ("", {"X-User-Id": "alice"}), ("", {"Authorization": "Bearer synthetic-invalid"}), ("?owner_id=alice", {})]:
-            check(http(base, path + suffix, headers=headers)[0] == 401, "An unverified request crossed the hosted identity boundary.")
+            expected = 403 if "Authorization" in headers else 401
+            check(http(base, path + suffix, headers=headers)[0] == expected, "An unverified request crossed the hosted identity boundary.")
     status, _, headers = http(base, "/")
     check(status in (302, 303, 307, 308), "Anonymous viewer did not redirect to login.")
     check(urljoin(base, headers.get("Location", "")) == base + "/auth/login", "Viewer redirected to an unexpected login endpoint.")
@@ -230,9 +231,11 @@ def test_browsers(runtime, base):
     mallory = Browser(base, runtime["issuer"])
     mallory.login(runtime["users"]["mallory"], expected=403)
     mallory.session(expected=401)
-    for path, body in [("/api/open", {"path": "synthetic.md"}), ("/api/compare", {"base_path": "synthetic.md", "candidate_path": "other.md"}), ("/mcp", {})]:
+    for path, body in [("/api/open", {"path": "synthetic.md"}), ("/api/compare", {"base_path": "synthetic.md", "candidate_path": "other.md"})]:
         headers = {"Origin": base, "X-CSRF-Token": alice.session()["csrf_token"]}
-        check(alice.request(path, body, headers)[0] == 404, "Hosted authentication enabled a local path or MCP endpoint.")
+        check(alice.request(path, body, headers)[0] == 404, "Hosted authentication enabled a local path endpoint.")
+    status, _, headers = alice.request("/mcp", {})
+    check(status == 401 and "Bearer" in headers.get("WWW-Authenticate", ""), "A web cookie authenticated the remote MCP transport.")
     return alice, bob
 
 

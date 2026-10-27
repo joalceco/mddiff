@@ -171,7 +171,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
-El primer paso es [S01: validar identidad/MCP y políticas](https://github.com/joalceco/mddiff/issues/2). [S02: separación del estado y modos](https://github.com/joalceco/mddiff/issues/3) puede avanzar en paralelo. El acceso público depende de cerrar las verificaciones, no solo de terminar las pantallas.
+Avance al 2026-10-27: S02, S04, S05 y [S06: agentes remotos](remote-agents.md) están implementados. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
 
 ## Fuera de esta beta
 

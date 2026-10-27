@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OnceCell, RwLock, watch};
 
@@ -28,7 +29,7 @@ impl VerifiedIdentity {
 }
 
 /// Already-read Markdown; a label is displayed but is never opened as a path.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
     pub label: String,
@@ -181,6 +182,30 @@ impl Workspace {
         self.update(Some(expected), || Ok((None, None))).await
     }
 
+    pub async fn propose_if_revision(
+        self: &Arc<Self>,
+        expected: u64,
+        candidate: Document,
+    ) -> Result<Arc<Snapshot>, AppError> {
+        let work = self.work().await;
+        if work.revision != expected {
+            return Err(conflict());
+        }
+        let base = work
+            .base
+            .as_ref()
+            .ok_or_else(|| {
+                AppError(
+                    axum::http::StatusCode::CONFLICT,
+                    "Abre un original antes de enviar una propuesta.".into(),
+                )
+            })?
+            .clone();
+        // The update checks the same revision again under the owner's lock.
+        self.replace_if_revision(expected, base, Some(candidate))
+            .await
+    }
+
     pub(crate) async fn load(
         self: &Arc<Self>,
         read: impl FnOnce() -> Result<(Document, Option<Document>), AppError> + Send + 'static,
@@ -301,6 +326,48 @@ mod tests {
             label: "synthetic.md".into(),
             markdown: text.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn proposals_preserve_the_original_and_do_not_replace_a_different_work() {
+        let workspace = Arc::new(Workspace::new());
+        assert_eq!(
+            workspace
+                .propose_if_revision(0, document("proposal"))
+                .await
+                .err()
+                .unwrap()
+                .0,
+            axum::http::StatusCode::CONFLICT
+        );
+        workspace
+            .replace_if_revision(0, document("original\r\n"), None)
+            .await
+            .unwrap();
+        workspace
+            .propose_if_revision(1, document("proposal"))
+            .await
+            .unwrap();
+        let work = workspace.work().await;
+        assert_eq!(work.base.as_ref().unwrap().markdown, "original\r\n");
+        assert_eq!(work.candidate.as_ref().unwrap().markdown, "proposal");
+        workspace
+            .replace_if_revision(2, document("another original"), None)
+            .await
+            .unwrap();
+        let before = workspace.snapshot().await;
+        let events = workspace.subscribe();
+        assert_eq!(
+            workspace
+                .propose_if_revision(2, document("late"))
+                .await
+                .err()
+                .unwrap()
+                .0,
+            axum::http::StatusCode::CONFLICT
+        );
+        assert!(Arc::ptr_eq(&before, &workspace.snapshot().await));
+        assert!(!events.has_changed().unwrap());
     }
 
     struct Database(std::path::PathBuf);

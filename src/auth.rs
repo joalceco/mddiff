@@ -39,6 +39,7 @@ const LOGIN_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(3600);
 const MAX_PENDING: usize = 256;
 const MAX_SESSIONS: usize = 1024;
+pub const REMOTE_SCOPE: &str = "mddiff:compare";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,6 +157,66 @@ pub struct Authenticator {
 }
 
 impl Authenticator {
+    pub fn public_origin(&self) -> &str {
+        &self.config.public_origin
+    }
+
+    pub fn resource_url(&self) -> String {
+        format!("{}/mcp", self.public_origin())
+    }
+
+    fn challenge(&self, err: AppError) -> Response {
+        let status = err.0;
+        let mut response = err.into_response();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            let reason = if status == StatusCode::UNAUTHORIZED {
+                "invalid_token"
+            } else {
+                "insufficient_scope"
+            };
+            let value = format!(
+                "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"{}\", error=\"{}\"",
+                self.public_origin(),
+                REMOTE_SCOPE,
+                reason
+            );
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_str(&value).unwrap(),
+            );
+        }
+        response
+    }
+
+    async fn remote_identity(&self, headers: &HeaderMap) -> Result<VerifiedIdentity, AppError> {
+        if headers.contains_key(header::COOKIE) {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "No mezcles cookies y autorización Bearer.",
+            ));
+        }
+        if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
+            return Err(error(
+                StatusCode::UNAUTHORIZED,
+                "Envía un único token Bearer de usuario.",
+            ));
+        }
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split_once(' '))
+            .filter(|(scheme, token)| {
+                scheme.eq_ignore_ascii_case("bearer")
+                    && !token.is_empty()
+                    && token.len() <= 16 * 1024
+                    && !token.chars().any(char::is_whitespace)
+            })
+            .map(|(_, token)| token)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Token Bearer inválido."))?;
+        let claims = self.token_claims(token).await?;
+        resource_identity(&self.config, &claims)
+    }
+
     pub async fn new(config: Config) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -275,6 +336,9 @@ impl Authenticator {
                 "Solicitud entre sitios no autorizada.",
             ));
         }
+        if path == "/mcp" && method == Method::DELETE {
+            return Ok(());
+        }
         crate::require_json_body(method, headers)
     }
 
@@ -312,7 +376,7 @@ impl Authenticator {
             .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "La sesión no es válida o caducó."))
     }
 
-    async fn introspect(&self, access: &str) -> Result<VerifiedIdentity, AppError> {
+    async fn token_claims(&self, access: &str) -> Result<Value, AppError> {
         let response = self
             .http
             .post(&self.introspection_url)
@@ -341,7 +405,11 @@ impl Authenticator {
                 "Respuesta de identidad inválida.",
             )
         })?;
-        identity_from_claims(&self.config, &claims)
+        Ok(claims)
+    }
+
+    async fn introspect(&self, access: &str) -> Result<VerifiedIdentity, AppError> {
+        identity_from_claims(&self.config, &self.token_claims(access).await?)
     }
 
     pub async fn revalidate(&self, handle: &SessionHandle) -> Result<VerifiedIdentity, AppError> {
@@ -407,12 +475,43 @@ impl Authenticator {
 }
 
 fn identity_from_claims(config: &Config, claims: &Value) -> Result<VerifiedIdentity, AppError> {
+    if claims["client_id"]
+        .as_str()
+        .or_else(|| claims["azp"].as_str())
+        != Some(config.client_id.as_str())
+    {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "La sesión no es válida o caducó.",
+        ));
+    }
+    verified_identity(config, claims, &config.audience)
+}
+
+fn resource_identity(config: &Config, claims: &Value) -> Result<VerifiedIdentity, AppError> {
+    let identity = verified_identity(config, claims, &format!("{}/mcp", config.public_origin))?;
+    if !claims["scope"].as_str().is_some_and(|s| {
+        s.split_ascii_whitespace()
+            .any(|scope| scope == REMOTE_SCOPE)
+    }) {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "El token requiere el permiso mddiff:compare.",
+        ));
+    }
+    Ok(identity)
+}
+
+fn verified_identity(
+    config: &Config,
+    claims: &Value,
+    expected_audience: &str,
+) -> Result<VerifiedIdentity, AppError> {
     let audience = &claims["aud"];
-    let matches_audience = audience.as_str() == Some(config.audience.as_str())
-        || audience.as_array().is_some_and(|a| {
-            a.iter()
-                .any(|v| v.as_str() == Some(config.audience.as_str()))
-        });
+    let matches_audience = audience.as_str() == Some(expected_audience)
+        || audience
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(expected_audience)));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -421,11 +520,11 @@ fn identity_from_claims(config: &Config, claims: &Value) -> Result<VerifiedIdent
         || claims["iss"].as_str() != Some(config.issuer.as_str())
         || !matches_audience
         || claims["exp"].as_u64().is_none_or(|e| e <= now)
-        || claims["sub"].as_str().is_none_or(str::is_empty)
+        || claims["sub"].as_str().is_none_or(|s| s.trim().is_empty())
         || claims["client_id"]
             .as_str()
             .or_else(|| claims["azp"].as_str())
-            != Some(config.client_id.as_str())
+            .is_none_or(str::is_empty)
     {
         return Err(error(
             StatusCode::UNAUTHORIZED,
@@ -470,6 +569,16 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/auth/callback", get(callback))
         .route("/auth/session", get(session_info))
         .route("/auth/logout", post(logout))
+        .route("/.well-known/oauth-protected-resource", get(metadata))
+        .route("/.well-known/oauth-protected-resource/mcp", get(metadata))
+}
+
+async fn metadata(State(app): State<Arc<App>>) -> Result<Json<Value>, AppError> {
+    let auth = app.auth.as_ref().ok_or_else(configuration_error)?;
+    Ok(Json(
+        json!({"resource":auth.resource_url(),"authorization_servers":[auth.config.issuer],
+        "scopes_supported":["openid","profile",REMOTE_SCOPE],"bearer_methods_supported":["header"]}),
+    ))
 }
 
 pub async fn authenticate(
@@ -480,6 +589,40 @@ pub async fn authenticate(
     let Some(auth) = &app.auth else {
         return next.run(request).await;
     };
+    let path = request.uri().path().to_owned();
+    if matches!(
+        path.as_str(),
+        "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp"
+    ) {
+        return next.run(request).await;
+    }
+    if request.headers().contains_key(header::AUTHORIZATION) {
+        if !matches!(path.as_str(), "/mcp" | "/api/work")
+            || (path == "/api/work"
+                && !matches!(
+                    *request.method(),
+                    Method::GET | Method::HEAD | Method::PUT | Method::PATCH
+                ))
+        {
+            return auth.challenge(error(
+                StatusCode::FORBIDDEN,
+                "Este endpoint no admite acceso con Bearer.",
+            ));
+        }
+        let headers = request.headers().clone();
+        let identity = match auth.remote_identity(&headers).await {
+            Ok(identity) => identity,
+            Err(err) => return auth.challenge(err),
+        };
+        request.extensions_mut().insert(identity);
+        return next.run(request).await;
+    }
+    if path == "/mcp" {
+        return auth.challenge(error(
+            StatusCode::UNAUTHORIZED,
+            "MCP requiere un token Bearer de usuario.",
+        ));
+    }
     if matches!(request.uri().path(), "/auth/login" | "/auth/callback")
         || (request.uri().path() == "/auth/logout" && request.method() == Method::POST)
     {
@@ -506,6 +649,7 @@ pub async fn authenticate(
         Err(err) if err.0 == StatusCode::UNAUTHORIZED && request.uri().path() == "/" => {
             Redirect::to("/auth/login").into_response()
         }
+        Err(err) if path == "/api/work" => auth.challenge(err),
         Err(err) => err.into_response(),
     }
 }
@@ -734,6 +878,98 @@ mod tests {
             "audience":"mddiff-resource"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn remote_tokens_bind_resource_permissions_and_identity_independently_from_web_client() {
+        let config = config();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = json!({"active":true,"iss":config.issuer,"sub":"alice","exp":now+60,
+            "aud":[config.audience,format!("{}/mcp",config.public_origin)],"client_id":"mddiff-codex",
+            "scope":"openid profile mddiff:compare","realm_access":{"roles":["mddiff-user"]}});
+        let remote = resource_identity(&config, &claims).unwrap();
+        let mut web = claims.clone();
+        web["client_id"] = json!(config.client_id);
+        assert_eq!(remote, identity_from_claims(&config, &web).unwrap());
+        assert_eq!(
+            identity_from_claims(&config, &claims).unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        for (key, value, status) in [
+            ("active", json!(false), StatusCode::UNAUTHORIZED),
+            (
+                "iss",
+                json!("https://other.example/realms/test"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            ("aud", json!([config.audience]), StatusCode::UNAUTHORIZED),
+            (
+                "aud",
+                json!(format!("{}/mcp/", config.public_origin)),
+                StatusCode::UNAUTHORIZED,
+            ),
+            ("exp", json!(now), StatusCode::UNAUTHORIZED),
+            ("sub", json!(" "), StatusCode::UNAUTHORIZED),
+            ("client_id", json!(""), StatusCode::UNAUTHORIZED),
+            (
+                "scope",
+                json!("openid mddiff:compare-extra"),
+                StatusCode::FORBIDDEN,
+            ),
+            ("realm_access", json!({"roles":[]}), StatusCode::FORBIDDEN),
+        ] {
+            let mut invalid = claims.clone();
+            invalid[key] = value;
+            assert_eq!(resource_identity(&config, &invalid).unwrap_err().0, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_or_mixed_remote_credentials_fail_before_introspection() {
+        let auth = authenticator(config());
+        let mut headers = HeaderMap::new();
+        for value in ["Basic synthetic", "Bearer ", "Bearer a b"] {
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+            assert_eq!(
+                auth.remote_identity(&headers).await.unwrap_err().0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer synthetic"),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer other"),
+        );
+        assert_eq!(
+            auth.remote_identity(&headers).await.unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        headers.remove(header::AUTHORIZATION);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer synthetic"),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("__Host-mddiff-session=synthetic"),
+        );
+        assert_eq!(
+            auth.remote_identity(&headers).await.unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        let response = auth.challenge(error(StatusCode::UNAUTHORIZED, "Inicia sesión."));
+        assert!(
+            response.headers()[header::WWW_AUTHENTICATE]
+                .to_str()
+                .unwrap()
+                .contains("https://viewer.example/.well-known/oauth-protected-resource/mcp")
+        );
     }
 
     fn authenticator(config: Config) -> Authenticator {
