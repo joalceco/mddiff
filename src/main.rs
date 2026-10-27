@@ -1,5 +1,6 @@
 mod auth;
 mod mcp;
+mod providers;
 
 use axum::{
     Extension, Json, Router,
@@ -33,6 +34,7 @@ struct App {
     port: u16,
     mode: Mode,
     auth: Option<Arc<auth::Authenticator>>,
+    connections: Option<Arc<providers::Providers>>,
 }
 
 impl App {
@@ -167,7 +169,7 @@ fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, AppErro
     payload.map(|Json(value)| value).map_err(|error| {
         AppError(
             error.status(),
-            format!("Solicitud JSON inválida: {}", error.body_text()),
+            "Solicitud JSON inválida. Revisa los campos y tipos requeridos.".into(),
         )
     })
 }
@@ -363,6 +365,7 @@ fn router(app: Arc<App>) -> Router {
     let router = if app.auth.is_some() {
         router
             .merge(auth::routes())
+            .merge(providers::routes())
             .route("/mcp", axum::routing::any(mcp::hosted_service))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&app),
@@ -387,6 +390,7 @@ struct Arguments {
     mode: CliMode,
     root: Option<PathBuf>,
     oidc_config: Option<PathBuf>,
+    connections_config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     port: u16,
     documents: Vec<PathBuf>,
@@ -400,6 +404,7 @@ fn parse_arguments(
         mode: CliMode::Local,
         root: None,
         oidc_config: None,
+        connections_config: None,
         data_dir: None,
         port: 3847,
         documents: Vec::new(),
@@ -427,6 +432,14 @@ fn parse_arguments(
                     arguments
                         .next()
                         .ok_or("Falta la carpeta después de --data-dir.")?
+                        .into(),
+                );
+            }
+            Some("--connections-config") => {
+                options.connections_config = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta el archivo después de --connections-config.")?
                         .into(),
                 );
             }
@@ -460,6 +473,11 @@ fn parse_arguments(
     if options.mode == CliMode::Local && options.oidc_config.is_some() {
         return Err("--oidc-config solo está disponible en modo alojado.".into());
     }
+    if options.connections_config.is_some()
+        && (options.mode != CliMode::Hosted || options.oidc_config.is_none())
+    {
+        return Err("--connections-config requiere modo hosted y --oidc-config.".into());
+    }
     if (options.mode == CliMode::Hosted) != options.data_dir.is_some() {
         return Err(
             "El modo hosted requiere --data-dir CARPETA; el modo local no admite esa opción."
@@ -477,7 +495,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado."
         );
         return Ok(());
     };
@@ -498,7 +516,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let app = Arc::new(App { mode, port, auth });
+    let connections = match (&arguments.connections_config, &mode, &auth) {
+        (Some(path), Mode::Hosted(workspaces), Some(auth)) => {
+            let config = providers::Config::load(path)?;
+            let store = workspaces.connection_store(&config.key_file)?;
+            Some(Arc::new(providers::Providers::new(
+                config,
+                store,
+                auth.public_origin(),
+            )?))
+        }
+        _ => None,
+    };
+    let app = Arc::new(App {
+        mode,
+        port,
+        auth,
+        connections,
+    });
     if let [base, candidate] = arguments.documents.as_slice() {
         app.local_reader()?
             .open(base.clone(), Some(candidate.clone()))
@@ -558,6 +593,7 @@ mod tests {
             port: 3847,
             mode: Mode::Hosted(Workspaces::default()),
             auth: None,
+            connections: None,
         });
         assert!(app.local_reader().is_err());
         for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
@@ -688,6 +724,16 @@ mod tests {
             vec!["--port", "invalid"],
             vec!["--root"],
             vec!["--oidc-config"],
+            vec!["--connections-config"],
+            vec!["--connections-config", "private.json"],
+            vec![
+                "--mode",
+                "hosted",
+                "--data-dir",
+                "private-data",
+                "--connections-config",
+                "private.json",
+            ],
             vec!["--data-dir"],
             vec!["--mode", "hosted"],
             vec!["--mode", "local", "--data-dir", "private-data"],

@@ -162,10 +162,12 @@ def inspect_database(path, runtime, expected):
     # The app holds an exclusive SQLite lock; callers inspect only after its process exits.
     check(path.is_file(), "Hosted mode did not create the promised SQLite database.")
     with closing(sqlite3.connect(path)) as connection:
-        check(connection.execute("PRAGMA user_version").fetchone()[0] == 1, "Unexpected work schema version.")
+        check(connection.execute("PRAGMA user_version").fetchone()[0] == 2, "Unexpected work schema version.")
         tables = connection.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-        check(len(tables) == 1 and tables[0][0] == "current_work", "Storage contains an unexpected document/history table.")
-        check("WITHOUT ROWID" in tables[0][1].upper(), "Work table does not use the intended compound primary key.")
+        schemas = dict(tables)
+        check(set(schemas) == {"current_work", "encrypted_connections"}, "Storage contains an unexpected document/history table.")
+        check("WITHOUT ROWID" in schemas["current_work"].upper(), "Work table does not use the intended compound primary key.")
+        check(connection.execute("SELECT count(*) FROM encrypted_connections").fetchone()[0] == 0, "Work APIs created an unsolicited provider connection.")
         rows = connection.execute("SELECT issuer, subject, revision, base_label, base_markdown, candidate_label, candidate_markdown FROM current_work").fetchall()
         check(len(rows) == len(expected), "Replacing or deleting work created extra rows or lost another owner.")
         records = {(row[0], row[1]): row[2:] for row in rows}

@@ -1,3 +1,4 @@
+pub mod connections;
 mod diff;
 pub mod local;
 mod storage;

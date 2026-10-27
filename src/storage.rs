@@ -1,4 +1,9 @@
-use std::{fs, path::Path, sync::Mutex, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
 
 use axum::http::StatusCode;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -8,7 +13,21 @@ use crate::{
     workspace::{Document, VerifiedIdentity, Work},
 };
 
-pub(crate) struct Storage(Mutex<Connection>);
+pub(crate) struct Storage {
+    connection: Mutex<Connection>,
+    directory: PathBuf,
+}
+
+pub(crate) struct EncryptedCredential {
+    pub nonce: [u8; 12],
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Default)]
+pub(crate) struct ConnectionRow {
+    pub generation: u64,
+    pub encrypted: Option<EncryptedCredential>,
+}
 
 fn unavailable() -> AppError {
     AppError(StatusCode::SERVICE_UNAVAILABLE,
@@ -25,7 +44,7 @@ pub(crate) fn conflict() -> AppError {
 impl Storage {
     #[cfg(test)]
     pub(crate) fn read_only_for_test(&self, value: bool) {
-        self.0
+        self.connection
             .lock()
             .unwrap()
             .pragma_update(None, "query_only", value)
@@ -72,7 +91,7 @@ impl Storage {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|_| unavailable())?;
-        if version > 1 {
+        if version > 2 {
             return Err(AppError::bad_request(
                 "La base usa un esquema más reciente; utiliza una versión compatible de mddiff.",
             ));
@@ -106,11 +125,139 @@ impl Storage {
                 .map_err(|_| unavailable())?;
             transaction.commit().map_err(|_| unavailable())?;
         }
-        Ok(Self(Mutex::new(connection)))
+        if version < 2 {
+            let transaction = connection.transaction().map_err(|_| unavailable())?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE encrypted_connections (
+                    issuer TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    provider TEXT NOT NULL CHECK (provider IN ('jira', 'memos')),
+                    destination TEXT NOT NULL,
+                    generation INTEGER NOT NULL CHECK (generation > 0),
+                    nonce BLOB,
+                    ciphertext BLOB,
+                    PRIMARY KEY (issuer, subject, provider, destination),
+                    CHECK ((nonce IS NULL) = (ciphertext IS NULL)),
+                    CHECK (nonce IS NULL OR length(nonce) = 12),
+                    CHECK (ciphertext IS NULL OR length(ciphertext) BETWEEN 16 AND 65552)
+                ) WITHOUT ROWID;
+                PRAGMA user_version=2;",
+                )
+                .map_err(|_| unavailable())?;
+            transaction.commit().map_err(|_| unavailable())?;
+        }
+        Ok(Self {
+            connection: Mutex::new(connection),
+            directory: fs::canonicalize(directory).map_err(|_| unavailable())?,
+        })
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    #[cfg(test)]
+    pub(crate) fn database_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.connection.lock().unwrap()
+    }
+
+    pub(crate) fn read_connection(
+        &self,
+        owner: &VerifiedIdentity,
+        provider: &str,
+        destination: &str,
+    ) -> Result<ConnectionRow, AppError> {
+        let connection = self.connection.lock().map_err(|_| unavailable())?;
+        connection
+            .query_row(
+                "SELECT generation, nonce, ciphertext FROM encrypted_connections
+             WHERE issuer=?1 AND subject=?2 AND provider=?3 AND destination=?4",
+                params![owner.issuer, owner.subject, provider, destination],
+                |row| {
+                    let generation: i64 = row.get(0)?;
+                    if generation <= 0 {
+                        return Err(rusqlite::Error::IntegralValueOutOfRange(0, generation));
+                    }
+                    let nonce: Option<Vec<u8>> = row.get(1)?;
+                    let ciphertext: Option<Vec<u8>> = row.get(2)?;
+                    let encrypted = match (nonce, ciphertext) {
+                        (Some(nonce), Some(ciphertext))
+                            if (16..=65552).contains(&ciphertext.len()) =>
+                        {
+                            Some(EncryptedCredential {
+                                nonce: nonce
+                                    .try_into()
+                                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                                ciphertext,
+                            })
+                        }
+                        (None, None) => None,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                    Ok(ConnectionRow {
+                        generation: generation as u64,
+                        encrypted,
+                    })
+                },
+            )
+            .optional()
+            .map(|row| row.unwrap_or_default())
+            .map_err(|_| unavailable())
+    }
+
+    pub(crate) fn replace_connection(
+        &self,
+        owner: &VerifiedIdentity,
+        provider: &str,
+        destination: &str,
+        expected: u64,
+        encrypted: Option<EncryptedCredential>,
+    ) -> Result<u64, AppError> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| unavailable())?;
+        let generation: i64 = transaction
+            .query_row(
+                "SELECT generation FROM encrypted_connections
+             WHERE issuer=?1 AND subject=?2 AND provider=?3 AND destination=?4",
+                params![owner.issuer, owner.subject, provider, destination],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| unavailable())?
+            .unwrap_or(0);
+        if u64::try_from(generation).ok() != Some(expected) {
+            return Err(crate::connections::connection_conflict());
+        }
+        let next = generation.checked_add(1).ok_or_else(|| {
+            AppError::bad_request("La generación de la conexión alcanzó el límite admitido.")
+        })?;
+        transaction
+            .execute(
+                "INSERT INTO encrypted_connections
+             (issuer,subject,provider,destination,generation,nonce,ciphertext)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(issuer,subject,provider,destination) DO UPDATE SET
+             generation=excluded.generation,nonce=excluded.nonce,ciphertext=excluded.ciphertext",
+                params![
+                    owner.issuer,
+                    owner.subject,
+                    provider,
+                    destination,
+                    next,
+                    encrypted.as_ref().map(|value| value.nonce.as_slice()),
+                    encrypted.as_ref().map(|value| &value.ciphertext)
+                ],
+            )
+            .map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| unavailable())?;
+        Ok(next as u64)
     }
 
     pub(crate) fn read(&self, owner: &VerifiedIdentity) -> Result<Work, AppError> {
-        let connection = self.0.lock().map_err(|_| unavailable())?;
+        let connection = self.connection.lock().map_err(|_| unavailable())?;
         connection
             .query_row(
                 "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown
@@ -154,7 +301,7 @@ impl Storage {
         base: Option<&Document>,
         candidate: Option<&Document>,
     ) -> Result<u64, AppError> {
-        let mut connection = self.0.lock().map_err(|_| unavailable())?;
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| unavailable())?;

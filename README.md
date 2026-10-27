@@ -86,7 +86,7 @@ La interfaz está incorporada en el binario. No necesitas copiar `web/` para eje
 ### Opciones de línea de comandos
 
 ```text
-mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [original.md propuesta.md]
+mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]
 ```
 
 | Argumento | Valor predeterminado | Descripción |
@@ -95,6 +95,7 @@ mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARC
 | `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el modo local. No se acepta en hosted. |
 | `--port PUERTO` | `3847` | Puerto HTTP. `0` solicita uno libre; la terminal muestra la URL asignada. |
 | `--oidc-config ARCHIVO` | Sin configuración | JSON privado del proveedor Keycloak; solo se acepta en hosted. |
+| `--connections-config ARCHIVO` | Deshabilitadas | Destinos aprobados, cliente Jira y referencia a la clave externa de conexiones; requiere hosted y OIDC. |
 | `--data-dir CARPETA` | Sin directorio | Obligatorio en hosted para el trabajo actual persistente. No se acepta en local. |
 | `original.md propuesta.md` | Sin documentos | Abre una comparación inicial. Se aceptan dos rutas o ninguna. |
 | `--help`, `-h` | — | Muestra el uso y termina. |
@@ -115,11 +116,17 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario; los conectores Jira/Memos siguen pendientes.
+Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos ya pueden configurarse; abrir su contenido como original pertenece a las próximas historias.
 
 Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
 
 ## Usar el visor
+
+### Conectar Jira Cloud y Memos en hosted
+
+Administración habilita destinos con `--connections-config` y una clave externa de 32 bytes para cifrar las credenciales. Desde **Conexiones**, junto a **Cerrar sesión**, cada usuario puede conectar, comprobar y desconectar sus cuentas. Jira solicita consentimiento OAuth de lectura; Memos 0.31 utiliza un token personal con un aviso explícito sobre su alcance. Desconectar conserva el trabajo actual.
+
+Las credenciales se cifran con AES-256-GCM y no se devuelven al navegador o MCP. El conector solo hace lecturas de negocio. El token de Memos puede permitir cambios fuera de mddiff; desconectar elimina su copia local y la revocación en el proveedor se realiza por separado. Consulta [la configuración, límites y pruebas de conexiones personales](docs/planning/personal-connections.md).
 
 En modo local, abre documentos mediante sus rutas:
 
@@ -420,6 +427,8 @@ Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_
 GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`.
 
 La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos y la evidencia local del 2026-10-27](docs/planning/remote-agents.md#reproducir-la-verificación); no se atribuye una corrida remota de CI.
+
+Las conexiones personales se verifican con `python3 scripts/test_connections.py` y proveedores sintéticos auditados; la pantalla tiene una prueba de contrato en `node tests/browser/connections.mjs`. La [guía de conexiones](docs/planning/personal-connections.md#reproducir-las-pruebas) describe requisitos y límites. No se ha validado el consentimiento con cuentas reales de Jira/Memos.
 
 ### Pruebas de importación en navegador
 

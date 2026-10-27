@@ -59,6 +59,16 @@ pub struct Workspaces {
 }
 
 impl Workspaces {
+    pub fn connection_store(
+        &self,
+        key_path: &std::path::Path,
+    ) -> Result<crate::connections::ConnectionStore, AppError> {
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            AppError::bad_request("Las conexiones requieren almacenamiento persistente alojado.")
+        })?;
+        crate::connections::ConnectionStore::new(Arc::clone(storage), key_path)
+    }
+
     pub fn persistent(directory: &std::path::Path) -> Result<Self, AppError> {
         Ok(Self {
             users: Mutex::default(),
@@ -594,7 +604,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            1
+            2
         );
         let columns: i32 = connection
             .query_row(
@@ -604,7 +614,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(columns, 7);
-        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
         drop(connection);
         assert!(Workspaces::persistent(&directory.0).is_err());
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
@@ -612,7 +622,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            2
+            3
         );
     }
 

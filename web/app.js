@@ -31,6 +31,165 @@ let textDraft = null;
 let importVersion = 0;
 const fileRevisions = { base: null, candidate: null };
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+let connectionsVersion = 0;
+let connectionsBusy = false;
+let memosDestination = null;
+
+function clearMemosForm() {
+  memosDestination = null;
+  $("memos-token").value = "";
+  $("memos-acknowledge").checked = false;
+  $("memos-form").hidden = true;
+}
+
+function closeConnections() {
+  connectionsVersion++;
+  clearMemosForm();
+  $("connections-list").replaceChildren();
+  $("connections-status").textContent = "";
+  $("connections-error").textContent = "";
+  $("connections-error").hidden = true;
+  setConnectionsBusy(false);
+  if ($("connections-dialog").open) $("connections-dialog").close();
+}
+
+function setConnectionsBusy(value) {
+  connectionsBusy = value;
+  $("connections-dialog").setAttribute("aria-busy", String(value));
+  for (const node of $("connections-dialog").querySelectorAll("[data-connection-action], #memos-token, #memos-acknowledge, #memos-submit, #memos-cancel")) node.disabled = value;
+}
+
+function activeConnections(previous, version) {
+  return Boolean(previous && authentication === previous && connectionsVersion === version && $("connections-dialog").open);
+}
+
+async function connectionsRequest(path, body, method) {
+  const previous = authentication;
+  const version = connectionsVersion;
+  const data = await request(path, body, method);
+  if (!activeConnections(previous, version)) return null;
+  if (!await sameWebSession(previous)) {
+    if (activeConnections(previous, version)) endSession();
+    return null;
+  }
+  return activeConnections(previous, version) ? data : null;
+}
+
+function connectionError(error) {
+  $("connections-status").textContent = "";
+  $("connections-error").textContent = error.message || "No se pudo actualizar la conexión. Vuelve a intentarlo.";
+  $("connections-error").hidden = false;
+}
+
+async function loadConnections() {
+  const data = await connectionsRequest("/api/connections");
+  if (!data) return false;
+  const connectionDestinations = data.enabled ? data.destinations || [] : [];
+  const list = document.createDocumentFragment();
+  for (const destination of connectionDestinations) {
+    const row = document.createElement("li");
+    row.dataset.destination = destination.id;
+    const details = document.createElement("div");
+    details.className = "connection-details";
+    const title = document.createElement("strong"); title.textContent = destination.label;
+    const address = document.createElement("span"); address.className = "connection-address"; address.textContent = `${destination.provider === "jira" ? "Jira" : "Memos"} · ${destination.url}`;
+    const state = document.createElement("span"); state.className = "connection-state"; state.textContent = destination.connected ? "Conectada" : "Sin conectar";
+    details.append(title, address, state);
+    const actions = document.createElement("div"); actions.className = "connection-actions";
+    const entries = [[destination.connected ? "Reconectar" : "Conectar", "connect"]];
+    if (destination.connected) entries.push(["Comprobar", "check"], ["Desconectar", "disconnect"]);
+    for (const [label, action] of entries) {
+      const button = document.createElement("button"); button.type = "button"; button.textContent = label;
+      button.dataset.connectionAction = action;
+      button.setAttribute("aria-label", `${label} ${destination.label}`);
+      button.addEventListener("click", () => connectionAction(destination, action));
+      actions.append(button);
+    }
+    row.append(details, actions); list.append(row);
+  }
+  $("connections-list").replaceChildren(list);
+  $("connections-status").textContent = !data.enabled ? "Las conexiones no están habilitadas en este servidor." : connectionDestinations.length ? "Cada conexión pertenece únicamente a tu cuenta." : "No hay destinos aprobados disponibles. Consulta al administrador.";
+  return true;
+}
+
+async function openConnections(message = "") {
+  if (!hosted || !authentication) return;
+  closeConnections();
+  const version = connectionsVersion;
+  const previous = authentication;
+  $("connections-dialog").showModal();
+  $("connections-status").textContent = "Cargando destinos…";
+  setConnectionsBusy(true);
+  try {
+    if (await loadConnections() && message) $("connections-status").textContent = message;
+  } catch (error) { if (activeConnections(previous, version)) connectionError(error); }
+  finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
+}
+
+async function connectionAction(destination, action) {
+  if (connectionsBusy || !authentication || !$("connections-dialog").open) return;
+  clearMemosForm();
+  $("connections-error").hidden = true;
+  if (action === "connect" && destination.provider === "memos") {
+    memosDestination = destination;
+    $("memos-title").textContent = `Conectar Memos · ${destination.label}`;
+    $("memos-form").hidden = false;
+    $("memos-token").focus();
+    return;
+  }
+  const version = connectionsVersion;
+  const previous = authentication;
+  const path = `/api/connections/${encodeURIComponent(destination.id)}`;
+  setConnectionsBusy(true);
+  $("connections-status").textContent = action === "connect" ? "Abriendo autorización de Jira…" : action === "check" ? "Comprobando conexión…" : "Desconectando…";
+  try {
+    const data = await connectionsRequest(action === "connect" ? `${path}/authorize` : action === "check" ? `${path}/check` : path, { expected_revision: destination.revision }, action === "disconnect" ? "DELETE" : "POST");
+    if (!data) return;
+    if (action === "connect") {
+      const url = new URL(data.authorization_url);
+      if (url.protocol !== "https:" || url.username || url.password) throw new Error("La autorización de Jira no está disponible. Vuelve a intentarlo.");
+      window.location.assign(url.href);
+    } else if (await loadConnections()) {
+      $("connections-status").textContent = action === "check" ? "Conexión comprobada." : "Conexión eliminada de mddiff. Tu trabajo se conserva.";
+    }
+  } catch (error) {
+    if (activeConnections(previous, version)) {
+      if (error.status === 409) await loadConnections().catch(() => {});
+      if (activeConnections(previous, version)) connectionError(error);
+    }
+  } finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
+}
+
+$("connections-button").addEventListener("click", () => openConnections());
+$("connections-close").addEventListener("click", closeConnections);
+$("connections-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeConnections(); });
+$("connections-dialog").addEventListener("close", () => { if (!$("connections-dialog").open) clearMemosForm(); });
+$("memos-cancel").addEventListener("click", clearMemosForm);
+$("memos-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (connectionsBusy || !memosDestination || !authentication || !$("connections-dialog").open || !$("memos-acknowledge").checked) return;
+  const destination = memosDestination;
+  const token = $("memos-token").value;
+  if (!token.trim()) { $("memos-token").focus(); return; }
+  const version = connectionsVersion;
+  const previous = authentication;
+  $("memos-token").value = "";
+  $("memos-acknowledge").checked = false;
+  $("connections-error").hidden = true;
+  setConnectionsBusy(true);
+  $("connections-status").textContent = "Guardando conexión…";
+  try {
+    const data = await connectionsRequest(`/api/connections/${encodeURIComponent(destination.id)}/memos`, { expected_revision: destination.revision, token, acknowledge_full_access: true }, "POST");
+    if (!data) return;
+    clearMemosForm();
+    if (await loadConnections()) $("connections-status").textContent = "Conexión guardada. mddiff solo realiza lecturas.";
+  } catch (error) {
+    if (activeConnections(previous, version)) {
+      if (error.status === 409) { clearMemosForm(); await loadConnections().catch(() => {}); }
+      if (activeConnections(previous, version)) connectionError(error);
+    }
+  } finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
+});
 
 async function request(path, body, method = "POST") {
   const response = await fetch(path, body === undefined ? {} : {
@@ -481,7 +640,7 @@ $("source-tab").addEventListener("click", () => { if (format === "source") retur
 $("previous-change").addEventListener("click", () => navigateChange(-1));
 $("next-change").addEventListener("click", () => navigateChange(1));
 document.addEventListener("keydown", (event) => {
-  if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,textarea,[contenteditable=true]")) return;
+  if ($("connections-dialog").open || event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,textarea,[contenteditable=true]")) return;
   if (event.key === "j" || event.key === "k") { event.preventDefault(); navigateChange(event.key === "j" ? 1 : -1); }
 });
 
@@ -498,6 +657,7 @@ function hostedView(title, description) {
 
 function endSession() {
   authentication = null;
+  closeConnections();
   resetImports();
   clearTimeout(reconnectTimer);
   events?.close();
@@ -509,6 +669,7 @@ function endSession() {
   $("base-path").value = $("candidate-path").value = "";
   $("auth-user").textContent = "";
   $("auth-user").hidden = $("logout-button").hidden = true;
+  $("connections-button").hidden = true;
   $("login-button").hidden = false;
   $("connection").textContent = "Sin sesión";
   $("connection").classList.remove("connected");
@@ -565,6 +726,7 @@ function connectEvents() {
 
 $("login-button").addEventListener("click", () => { window.location.assign("/auth/login"); });
 $("logout-button").addEventListener("click", async () => {
+  closeConnections();
   $("logout-button").disabled = true;
   try {
     await request("/auth/logout", {});
@@ -583,9 +745,16 @@ async function start() {
     authentication = await response.json();
     $("auth-user").textContent = authentication.user_label;
     $("auth-user").hidden = $("logout-button").hidden = false;
+    $("connections-button").hidden = false;
     hostedView("Tu espacio privado", "Pega el original o sube un Markdown desde su cabecera para empezar.");
     $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
     connectEvents();
+    const result = new URL(window.location.href).searchParams.get("connection");
+    if (["connected", "error"].includes(result)) {
+      const url = new URL(window.location.href); url.searchParams.delete("connection");
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+      await openConnections(result === "connected" ? "Conexión completada." : "No se pudo conectar Jira. Vuelve a intentarlo.");
+    }
   } catch (error) { showError(error); }
 }
 start();

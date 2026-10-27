@@ -143,7 +143,7 @@ struct Session {
 }
 
 /// Opaque capability inserted only after a valid server-side session is checked.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionHandle(String);
 
 pub struct Authenticator {
@@ -318,14 +318,16 @@ impl Authenticator {
             return Err(error(StatusCode::FORBIDDEN, "Origen o Host no autorizado."));
         }
         let navigation = method == Method::GET
-            && (matches!(path, "/auth/login" | "/auth/callback")
-                || (path == "/"
-                    && headers
-                        .get("sec-fetch-mode")
-                        .is_some_and(|v| v == "navigate")
-                    && headers
-                        .get("sec-fetch-dest")
-                        .is_some_and(|v| v == "document")));
+            && (matches!(
+                path,
+                "/auth/login" | "/auth/callback" | "/connections/jira/callback"
+            ) || (path == "/"
+                && headers
+                    .get("sec-fetch-mode")
+                    .is_some_and(|v| v == "navigate")
+                && headers
+                    .get("sec-fetch-dest")
+                    .is_some_and(|v| v == "document")));
         if headers
             .get("sec-fetch-site")
             .is_some_and(|v| v == "cross-site")
@@ -1234,6 +1236,7 @@ mod tests {
             port: 3848,
             mode: crate::Mode::Hosted(Workspaces::default()),
             auth: Some(auth.clone()),
+            connections: None,
         });
         let alice = auth
             .local_session(&SessionHandle("alice".into()))

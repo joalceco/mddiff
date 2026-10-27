@@ -1227,6 +1227,7 @@ dependencies = [
  "openidconnect",
  "pulldown-cmark",
  "reqwest",
+ "ring",
  "rmcp",
  "rusqlite",
  "serde",

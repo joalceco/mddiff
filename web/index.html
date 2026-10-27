@@ -15,12 +15,35 @@
     <div class="header-actions">
       <span id="connection" class="connection" role="status">Conectando…</span>
       <span id="auth-user" class="session-user" hidden></span>
+      <button id="connections-button" type="button" aria-haspopup="dialog" aria-controls="connections-dialog" hidden>Conexiones</button>
       <button id="logout-button" type="button" hidden>Cerrar sesión</button>
       <button id="login-button" type="button" hidden>Iniciar sesión</button>
       <button id="reload-button" type="button" title="Volver a leer los archivos desde disco" disabled>↻ Recargar</button>
       <button id="theme-toggle" type="button">Modo claro</button>
     </div>
   </header>
+  <dialog id="connections-dialog" class="connections-dialog" aria-labelledby="connections-title" aria-describedby="connections-description">
+    <div class="connections-heading">
+      <h2 id="connections-title">Conexiones personales</h2>
+      <button id="connections-close" type="button" aria-label="Cerrar conexiones">Cerrar</button>
+    </div>
+    <p id="connections-description">Conecta tus cuentas a los destinos aprobados. mddiff solo realiza lecturas.</p>
+    <p id="connections-status" class="connections-status" role="status"></p>
+    <p id="connections-error" class="connections-error" role="alert" hidden></p>
+    <ul id="connections-list" class="connections-list" aria-label="Destinos disponibles"></ul>
+    <form id="memos-form" class="memos-form" autocomplete="off" hidden>
+      <h3 id="memos-title">Conectar Memos</h3>
+      <label for="memos-token">Token personal de Memos</label>
+      <input id="memos-token" type="password" name="memos_token" autocomplete="off" spellcheck="false" required aria-describedby="memos-warning">
+      <p id="memos-warning" class="connection-warning">El token de Memos puede permitir cambios. mddiff solo realiza lecturas.</p>
+      <label class="connection-acknowledgement"><input id="memos-acknowledge" type="checkbox" required><span>Entiendo el alcance del token y autorizo su uso para lecturas.</span></label>
+      <div class="connection-form-actions">
+        <button id="memos-cancel" type="button">Cancelar</button>
+        <button id="memos-submit" type="submit">Conectar Memos</button>
+      </div>
+    </form>
+    <p class="connections-note">Desconectar elimina la credencial de mddiff y conserva el trabajo. Para revocarla en el proveedor, retira el token de Memos o el acceso de mddiff en Atlassian.</p>
+  </dialog>
   <div class="workspace">
     <main>
       <div class="toolbar">
