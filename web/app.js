@@ -23,15 +23,21 @@ let busy = false;
 let openTimer = null;
 let inputVersion = 0;
 let pathsDirty = false;
+let authentication = null;
+let hosted = false;
+let events = null;
 
 async function request(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", ...(authentication ? { "X-CSRF-Token": authentication.csrf_token } : {}) }, body: JSON.stringify(body),
   });
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = null; }
-  if (!response.ok) throw new Error(data?.error || data?.message || text || `Error ${response.status}`);
+  if (!response.ok) {
+    if (hosted && [401, 403].includes(response.status)) endSession();
+    throw new Error(data?.error || data?.message || text || `Error ${response.status}`);
+  }
   return data;
 }
 
@@ -50,6 +56,7 @@ function setBusy(value) {
 }
 
 async function openFiles(example = false) {
+  if (hosted) return;
   clearTimeout(openTimer);
   openTimer = null;
   if (busy) return;
@@ -94,7 +101,10 @@ function applySession(data) {
 }
 
 async function refresh() {
-  try { applySession(await request("/api/state")); }
+  try {
+    const data = await request("/api/state");
+    if (!hosted || authentication) applySession(data);
+  }
   catch (error) { showError(error); }
 }
 
@@ -244,7 +254,76 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "j" || event.key === "k") { event.preventDefault(); navigateChange(event.key === "j" ? 1 : -1); }
 });
 
-const events = new EventSource("/api/events");
-events.onopen = () => { acceptedRevision = -1; $("connection").textContent = "Conectado"; $("connection").classList.add("connected"); };
-events.addEventListener("revision", () => refresh());
-events.onerror = () => { $("connection").textContent = "Reconectando…"; $("connection").classList.remove("connected"); };
+function hostedView(title, description) {
+  $("pane-headers").hidden = true;
+  $("reload-button").hidden = true;
+  $("example-button").hidden = true;
+  $("empty").querySelector("ol").hidden = true;
+  $("empty").querySelector("h1").textContent = title;
+  $("empty").querySelector("p").textContent = description;
+  $("empty").querySelector(".small-label").textContent = "MDDIFF";
+  $("timing").textContent = "Espacio privado";
+}
+
+function endSession() {
+  authentication = null;
+  events?.close();
+  clearTimeout(openTimer);
+  session = null;
+  acceptedRevision = -1;
+  changes = [];
+  $("rows").replaceChildren();
+  $("base-path").value = $("candidate-path").value = "";
+  $("auth-user").textContent = "";
+  $("auth-user").hidden = $("logout-button").hidden = true;
+  $("login-button").hidden = false;
+  $("connection").textContent = "Sin sesión";
+  $("connection").classList.remove("connected");
+  $("document-status").textContent = "Inicia sesión para continuar.";
+  $("error").hidden = true;
+  render();
+  hostedView("Sesión finalizada", "Vuelve a iniciar sesión para acceder a tus documentos.");
+}
+
+function connectEvents() {
+  events = new EventSource("/api/events");
+  events.onopen = () => { acceptedRevision = -1; $("connection").textContent = "Conectado"; $("connection").classList.add("connected"); };
+  events.addEventListener("revision", () => refresh());
+  events.onerror = async () => {
+    $("connection").textContent = "Reconectando…";
+    $("connection").classList.remove("connected");
+    if (hosted) {
+      try {
+        const response = await fetch("/auth/session");
+        if (!response.ok) endSession();
+      } catch { endSession(); }
+    }
+  };
+}
+
+$("login-button").addEventListener("click", () => { window.location.assign("/auth/login"); });
+$("logout-button").addEventListener("click", async () => {
+  $("logout-button").disabled = true;
+  try {
+    await request("/auth/logout", {});
+    endSession();
+  } catch (error) { showError(error); }
+  finally { $("logout-button").disabled = false; }
+});
+window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); });
+
+async function start() {
+  try {
+    const response = await fetch("/auth/session");
+    if (response.status === 404) { connectEvents(); return; }
+    hosted = true;
+    if (!response.ok) { endSession(); return; }
+    authentication = await response.json();
+    $("auth-user").textContent = authentication.user_label;
+    $("auth-user").hidden = $("logout-button").hidden = false;
+    hostedView("Tu espacio privado", "No hay documentos abiertos en esta cuenta.");
+    $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
+    connectEvents();
+  } catch (error) { showError(error); }
+}
+start();

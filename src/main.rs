@@ -1,3 +1,4 @@
+mod auth;
 mod mcp;
 
 use axum::{
@@ -30,6 +31,7 @@ enum Mode {
 struct App {
     port: u16,
     mode: Mode,
+    auth: Option<Arc<auth::Authenticator>>,
 }
 
 impl App {
@@ -90,6 +92,10 @@ fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(
             "Solicitud entre sitios no autorizada.".into(),
         ));
     }
+    require_json_post(method, headers)
+}
+
+fn require_json_post(method: &Method, headers: &HeaderMap) -> Result<(), AppError> {
     if method == Method::POST {
         let content_type = headers
             .get(header::CONTENT_TYPE)
@@ -112,7 +118,12 @@ async fn security(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let mut response = match validate_request(request.method(), request.headers(), app.port) {
+    let validation = if let Some(auth) = &app.auth {
+        auth.validate_boundary(request.method(), request.uri().path(), request.headers())
+    } else {
+        validate_request(request.method(), request.headers(), app.port)
+    };
+    let mut response = match validation {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
@@ -186,19 +197,49 @@ async fn compare_documents(
 async fn events(
     State(app): State<Arc<App>>,
     identity: Option<Extension<VerifiedIdentity>>,
+    session: Option<Extension<auth::SessionHandle>>,
 ) -> Result<impl IntoResponse, AppError> {
     let workspace = app.workspace(identity).await?;
+    let authorization = match (&app.auth, session) {
+        (Some(auth), Some(Extension(session))) => Some((Arc::clone(auth), session)),
+        (Some(_), None) => {
+            return Err(AppError(
+                StatusCode::UNAUTHORIZED,
+                "La sesión no es válida.".into(),
+            ));
+        }
+        (None, _) => None,
+    };
     let events = stream::unfold(
-        (workspace.subscribe(), true),
-        |(mut receiver, first)| async move {
-            if !first && receiver.changed().await.is_err() {
+        (workspace.subscribe(), true, authorization),
+        |(mut receiver, first, authorization)| async move {
+            if !first {
+                loop {
+                    if let Some((auth, session)) = &authorization {
+                        tokio::select! {
+                            changed=receiver.changed()=>{if changed.is_err(){return None;}break;},
+                            _=tokio::time::sleep(Duration::from_secs(2))=>{
+                                if auth.revalidate(session).await.is_err(){return None;}
+                            }
+                        }
+                    } else {
+                        if receiver.changed().await.is_err() {
+                            return None;
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some((auth, session)) = &authorization
+                && auth.revalidate(session).await.is_err()
+            {
                 return None;
             }
             let revision = *receiver.borrow_and_update();
             let event = Event::default()
                 .event("revision")
                 .data(revision.to_string());
-            Some((Ok::<_, Infallible>(event), (receiver, false)))
+            Some((Ok::<_, Infallible>(event), (receiver, false, authorization)))
         },
     );
     Ok(Sse::new(events).keep_alive(
@@ -241,6 +282,16 @@ fn router(app: Arc<App>) -> Router {
             .route_service("/mcp", mcp::service(Arc::clone(reader), app.port)),
         Mode::Hosted(_) => router,
     };
+    let router = if app.auth.is_some() {
+        router
+            .merge(auth::routes())
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&app),
+                auth::authenticate,
+            ))
+    } else {
+        router
+    };
     router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), security))
@@ -256,6 +307,7 @@ enum CliMode {
 struct Arguments {
     mode: CliMode,
     root: Option<PathBuf>,
+    oidc_config: Option<PathBuf>,
     port: u16,
     documents: Vec<PathBuf>,
 }
@@ -267,6 +319,7 @@ fn parse_arguments(
     let mut options = Arguments {
         mode: CliMode::Local,
         root: None,
+        oidc_config: None,
         port: 3847,
         documents: Vec::new(),
     };
@@ -279,6 +332,14 @@ fn parse_arguments(
                     Some("hosted") => CliMode::Hosted,
                     _ => return Err("Usa --mode local o --mode hosted.".into()),
                 };
+            }
+            Some("--oidc-config") => {
+                options.oidc_config = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta el archivo después de --oidc-config.")?
+                        .into(),
+                );
             }
             Some("--root") => {
                 options.root = Some(
@@ -307,6 +368,9 @@ fn parse_arguments(
     {
         return Err("El modo alojado no admite --root ni rutas de archivos locales.".into());
     }
+    if options.mode == CliMode::Local && options.oidc_config.is_some() {
+        return Err("--oidc-config solo está disponible en modo alojado.".into());
+    }
     if !matches!(options.documents.len(), 0 | 2) {
         return Err("Indica dos archivos para comparar, o ninguno para abrir el lector.".into());
     }
@@ -318,9 +382,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere un adaptador de identidad; sin él, estado y eventos rechazan el acceso."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nUsa --oidc-config con Keycloak en hosted; sin configuración, estado y eventos rechazan el acceso."
         );
         return Ok(());
+    };
+    let auth = match &arguments.oidc_config {
+        Some(path) => Some(Arc::new(
+            auth::Authenticator::new(auth::Config::load(path)?).await?,
+        )),
+        None => None,
     };
     let mode = match arguments.mode {
         CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
@@ -331,7 +401,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let app = Arc::new(App { mode, port });
+    let app = Arc::new(App { mode, port, auth });
     if let [base, candidate] = arguments.documents.as_slice() {
         app.local_reader()?
             .open(base.clone(), Some(candidate.clone()))
@@ -342,7 +412,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &app.mode {
         Mode::Local(reader) => println!("Carpeta autorizada: {}", reader.root().display()),
         Mode::Hosted(_) => {
-            println!("Modo alojado: acceso cerrado hasta integrar el adaptador de identidad.")
+            println!(
+                "Modo alojado: {}",
+                if app.auth.is_some() {
+                    "autenticación OIDC habilitada."
+                } else {
+                    "acceso cerrado sin configuración OIDC."
+                }
+            )
         }
     }
     // The read-only server can stop immediately instead of waiting for open SSE streams.
@@ -383,6 +460,7 @@ mod tests {
         let app = Arc::new(App {
             port: 3847,
             mode: Mode::Hosted(Workspaces::default()),
+            auth: None,
         });
         assert!(app.local_reader().is_err());
         for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
@@ -512,6 +590,8 @@ mod tests {
             vec!["--port"],
             vec!["--port", "invalid"],
             vec!["--root"],
+            vec!["--oidc-config"],
+            vec!["--mode", "local", "--oidc-config", "private.json"],
             vec!["--unknown"],
         ] {
             assert!(parse_arguments(arguments.into_iter().map(OsString::from)).is_err());

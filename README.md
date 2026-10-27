@@ -6,7 +6,7 @@
 
 mddiff es una herramienta local para revisar documentos y propuestas de una IA. Conserva encabezados, listas, tablas y código; alinea los bloques y resalta las palabras que cambiaron. Un único proceso Rust sirve el visor, una API HTTP y un servidor MCP. Un agente puede abrir una comparación y actualizar el navegador que ya tienes abierto.
 
-El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. No requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar.
+El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado en desarrollo autentica sesiones web mediante Keycloak; todavía no es una beta pública.
 
 **Ir a:** [Inicio rápido](#inicio-rápido) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
@@ -85,14 +85,15 @@ La interfaz está incorporada en el binario. No necesitas copiar `web/` para eje
 ### Opciones de línea de comandos
 
 ```text
-mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [original.md propuesta.md]
+mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [original.md propuesta.md]
 ```
 
 | Argumento | Valor predeterminado | Descripción |
 | --- | --- | --- |
-| `--mode local\|hosted` | `local` | Selecciona las capacidades del proceso. El modo alojado sigue cerrado hasta integrar autenticación. |
-| `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el servidor. |
+| `--mode local\|hosted` | `local` | Selecciona el lector local o el modo alojado con espacios privados. |
+| `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el modo local. No se acepta en hosted. |
 | `--port PUERTO` | `3847` | Puerto HTTP. `0` solicita uno libre; la terminal muestra la URL asignada. |
+| `--oidc-config ARCHIVO` | Sin configuración | JSON privado del proveedor Keycloak; solo se acepta en hosted. |
 | `original.md propuesta.md` | Sin documentos | Abre una comparación inicial. Se aceptan dos rutas o ninguna. |
 | `--help`, `-h` | — | Muestra el uso y termina. |
 
@@ -102,15 +103,17 @@ Para leer un solo archivo, inicia sin rutas y usa el visor o `POST /api/open`.
 
 El modo **local** es el predeterminado. Conserva el lector, la API de archivos, el MCP local y las validaciones de `--root` descritos en este README.
 
-El modo **hosted** es una base de arquitectura, todavía sin autenticación integrada:
+El modo **hosted** integra login web OIDC con Keycloak mediante Authorization Code + PKCE. Su configuración JSON debe estar fuera del repositorio, en un archivo normal con permisos `0600`:
 
 ```sh
-cargo run --release --locked -- --mode hosted --port 3848
+cargo run --release --locked -- --mode hosted --port 3848 --oidc-config "$HOME/.config/mddiff/oidc.json"
 ```
 
-En este modo no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o el MCP local. La CLI rechaza `--root` y rutas posicionales. Estado y eventos requieren una identidad verificada insertada por código del servidor; headers, cookies o un `owner_id` del cliente no la crean. Sin el futuro adaptador de autenticación, esos endpoints devuelven `401`. El proceso sigue limitado a loopback.
+Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Cada identidad interna (`issuer`, `subject`) obtiene su propio snapshot, bloqueo de apertura y canal de revisiones. El almacenamiento continúa en memoria. Este avance no es todavía una aplicación multiusuario utilizable ni un despliegue público. Véase [la separación de modos y estado](docs/planning/user-workspaces.md).
+Sin configuración OIDC, estado y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La importación de texto/archivos y el MCP alojado siguen pendientes.
+
+Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Estado y sesiones continúan en memoria hasta implementar persistencia; reiniciar el proceso los elimina. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [la guía de configuración y verificación de autenticación alojada](docs/planning/hosted-auth.md) y [la separación de modos y estado](docs/planning/user-workspaces.md).
 
 ## Usar el visor
 
@@ -124,7 +127,7 @@ Cada identidad interna (`issuer`, `subject`) obtiene su propio snapshot, bloqueo
 
 Los atajos no se activan mientras escribes en un campo. El tema se cambia desde **Modo claro** / **Modo oscuro** y se conserva en el mismo navegador. Un error al abrir una ruta mantiene el último documento o comparación válidos.
 
-Todas las pestañas conectadas al mismo proceso comparten la comparación actual. Para revisar pares independientes, inicia procesos con puertos distintos.
+En modo local, todas las pestañas conectadas al mismo proceso comparten la comparación actual. Para revisar pares locales independientes, inicia procesos con puertos distintos. En hosted, el espacio lo decide la identidad verificada y las pestañas de una misma persona comparten su espacio.
 
 ### Interpretar el diff
 
@@ -146,7 +149,7 @@ No se identifican movimientos de párrafos como una operación distinta. Las lis
 
 ## Usar desde Codex con MCP
 
-El endpoint es `http://127.0.0.1:3847/mcp`. Usa **Streamable HTTP** con el SDK Rust `rmcp`; comparte proceso, estado y validación de archivos con la API.
+En modo local, el endpoint es `http://127.0.0.1:3847/mcp`. Usa **Streamable HTTP** con el SDK Rust `rmcp`; comparte proceso, estado y validación de archivos con la API. El MCP alojado no está habilitado por la integración de autenticación web.
 
 1. Inicia mddiff con la raíz que contiene tus dos documentos y mantén el proceso en ejecución.
 2. Registra el servidor una vez en Codex:
@@ -188,7 +191,7 @@ La herramienta cambia el estado del visor y no escribe archivos. No necesita aut
 
 ## API HTTP
 
-Todos los ejemplos usan el puerto predeterminado y el servidor iniciado desde el repositorio con `--root .`.
+Todos los ejemplos de apertura usan el modo local, el puerto predeterminado y el servidor iniciado desde el repositorio con `--root .`. Hosted no registra esos endpoints de archivos; sus rutas de sesión y acceso al estado se describen en [la guía de autenticación](docs/planning/hosted-auth.md).
 
 ### Abrir un documento
 
@@ -258,7 +261,9 @@ Los errores de apertura de la API usan un cuerpo como `{"error":"El archivo debe
 
 ## Privacidad y límites de confianza
 
-El visor lee archivos locales y mantiene la comparación en memoria. No guarda documentos, no incorpora llamadas a modelos ni envía contenido a servicios de análisis. El tema es la única preferencia que la interfaz escribe en `localStorage`. Reiniciar el servidor elimina su estado en memoria; puedes abrir de nuevo los archivos o indicarlos al arrancar.
+En modo local, el visor lee archivos y mantiene la comparación en memoria. No guarda documentos, no incorpora llamadas a modelos ni envía contenido a servicios de análisis. El tema es la única preferencia que la interfaz escribe en `localStorage`. Reiniciar el servidor elimina su estado en memoria; puedes abrir de nuevo los archivos o indicarlos al arrancar.
+
+En hosted, las sesiones y los espacios privados también permanecen en memoria. Los tokens del IdP se guardan en el backend y no se exponen al navegador. El archivo OIDC contiene secretos y debe mantenerse fuera del checkout, con permisos privados. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO.
 
 La interfaz se sirve desde el propio binario, usa fuentes del sistema y bloquea la carga de imágenes. Abrir un enlace externo del documento lleva al destino elegido en una pestaña nueva. La política de datos del agente o cliente MCP que utilices es independiente de mddiff.
 
@@ -274,7 +279,9 @@ La interfaz se sirve desde el propio binario, usa fuentes del sistema y bloquea 
 
 El servidor escucha en `127.0.0.1`, comprueba `Host` y `Origin`, rechaza solicitudes entre sitios y aplica una política CSP restrictiva. El HTML renderizado se sanea con `ammonia`, incluido el HTML que contiene highlights. La fuente se inserta como texto.
 
-**Es una herramienta local de un solo usuario.** No incluye autenticación, TLS ni aislamiento entre usuarios del mismo equipo. Un proceso local con acceso al puerto puede leer el estado o solicitar otros Markdown dentro de la raíz autorizada. No está diseñada para exponerla mediante un proxy público o un túnel remoto.
+**El modo local es una herramienta de un solo usuario.** No incluye autenticación ni aislamiento entre usuarios del mismo equipo. Un proceso local con acceso al puerto puede leer el estado o solicitar otros Markdown dentro de la raíz autorizada. No lo expongas mediante un proxy público o un túnel remoto.
+
+El modo hosted incorpora autenticación y separación de propietarios, pero todavía no configura TLS ni un listener público. Su sesión exige admisión en Keycloak; las mutaciones por cookie requieren Origin exacto y un token CSRF asociado a la sesión. La excepción HTTP de pruebas solo se admite con `allow_insecure_loopback: true` y ambos orígenes en loopback. El despliegue del cluster se desarrolla por separado.
 
 ### Qué se publica en este repositorio
 
@@ -297,6 +304,7 @@ flowchart LR
 | Archivo | Responsabilidad |
 | --- | --- |
 | `src/main.rs` | CLI, selección de modo, rutas HTTP, resolución de identidad, SSE y controles de acceso local. |
+| `src/auth.rs` | Configuración OIDC, login Keycloak, sesiones web opacas, introspección, admisión, CSRF y logout local. |
 | `src/local.rs` | Capacidad de lectura de archivos locales, canonicalización, límites y apertura en el espacio local. |
 | `src/workspace.rs` | Identidad interna, registro de espacios por usuario, snapshots, coordinación y revisiones por espacio. |
 | `src/diff.rs` | Markdown, conservación de fuente, alineamiento de bloques, detalle por palabras y saneamiento HTML. |
@@ -305,7 +313,7 @@ flowchart LR
 | `scripts/` | Integración MCP y medición reproducible de rendimiento, con Python estándar. |
 | `examples/` | Dos documentos de demostración que se pueden comparar. |
 
-El servidor usa `axum` y `tokio`; el motor usa `pulldown-cmark`, `similar` y `ammonia`; MCP usa `rmcp`. `Cargo.lock` fija las versiones resueltas. Las aperturas se serializan para que una solicitud anterior y lenta no sustituya el resultado de otra posterior.
+El servidor usa `axum` y `tokio`; el motor usa `pulldown-cmark`, `similar` y `ammonia`; MCP usa `rmcp`; la autenticación web usa `openidconnect`. `Cargo.lock` fija las versiones resueltas. Las aperturas se serializan para que una solicitud anterior y lenta no sustituya el resultado de otra posterior.
 
 La interfaz agrupa las filas de 64 en 64 con `content-visibility: auto`. Todos los bloques permanecen en el DOM para lectura y búsqueda; el navegador puede omitir la composición de grupos fuera de pantalla.
 
@@ -353,7 +361,9 @@ python3 scripts/test_modes.py
 
 Esta prueba verifica CLI local predeterminada y explícita, modos inválidos, ausencia de endpoints de archivos en hosted, rechazo de identidades inventadas, controles HTTP y archivos intactos. Las pruebas Rust ejercitan dos propietarios internos y sus handlers de estado/SSE con identidades de prueba insertadas por código, sin convertir headers de usuarios en credenciales.
 
-GitHub Actions ejecuta estas mismas comprobaciones. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga y reconexión. No hay una suite automatizada de navegador incluida.
+La integración de la aplicación principal con un Keycloak sintético requiere Docker y una fixture local. Sigue los comandos `up`, compilación, `scripts/test_hosted_auth.py` y `down` de [la guía de autenticación alojada](docs/planning/hosted-auth.md#comprobar-con-la-fixture-sintética). Esta comprobación cubre sesiones, admisión, logout/CSRF, caducidad, revocación y cierre del SSE; no valida Google/GitHub.
+
+GitHub Actions ejecuta formato, análisis estático, pruebas Rust e integraciones de MCP local y separación de modos. La prueba con Keycloak se ejecuta explícitamente con su fixture. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga y reconexión. No hay una suite automatizada de navegador incluida.
 
 Los cambios en `web/` requieren volver a compilar y reiniciar el servidor, porque los recursos se incorporan al binario. No hay un servidor de desarrollo JavaScript separado.
 

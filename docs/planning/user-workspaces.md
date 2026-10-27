@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-27. Issue: [#3](https://github.com/joalceco/mddiff/issues/3). Rama: `feature/multiuser-sources`.
 
+Este documento registra el estado al terminar S02. La integración posterior de autenticación en el producto se describe en [S03: autenticación web alojada](hosted-auth.md).
+
 ## Resultado
 
 El lector local conserva CLI, API, MCP y el formato de sus snapshots. El motor de diff no cambia. La lectura de archivos está separada del servicio de comparación y el estado deja de pertenecer a toda la aplicación: snapshot, bloqueo de actualización y canal de revisiones pertenecen a cada espacio.

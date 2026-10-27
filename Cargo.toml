@@ -10,7 +10,9 @@ repository = "https://github.com/joalceco/mddiff"
 ammonia = "4"
 axum = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+openidconnect = { version = "4.0.1", features = ["timing-resistant-secret-traits"] }
 pulldown-cmark = "0.13.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "3.7.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
