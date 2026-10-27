@@ -18,6 +18,7 @@ El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están
 | Comparación renderizada | Original a la izquierda y propuesta a la derecha, con filas alineadas. |
 | Detalle de cambios | Fondo rojo o verde por bloque, signos `−` y `+`, y un highlight más intenso en las palabras modificadas. |
 | Vista de fuente | Markdown exacto, rangos de líneas y fragmentos de sintaxis modificados. |
+| Entradas alojadas | Pegar texto o subir `.md` desde las cabeceras; apertura y comparación automáticas. |
 | Integración | Herramienta MCP `open_comparison` y API HTTP local. |
 | Actualización de la vista | SSE avisa al navegador cuando otra solicitud abre un documento o una comparación. |
 | Navegación | Botones y atajos `J` / `K` para recorrer los cambios. |
@@ -114,11 +115,13 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La importación desde la interfaz y el MCP alojado siguen pendientes; la API del trabajo acepta contenido Markdown, sin abrir rutas del host.
+Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. El MCP alojado y los conectores Jira/Memos siguen pendientes; la API de trabajo utiliza la sesión web y CSRF, sin un token de agente añadido por la importación manual.
 
 Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [la persistencia y API del trabajo actual](docs/planning/current-work.md), [la autenticación alojada](docs/planning/hosted-auth.md) y [la separación de modos y estado](docs/planning/user-workspaces.md).
 
 ## Usar el visor
+
+En modo local, abre documentos mediante sus rutas:
 
 1. Pega la ruta del original en su cabecera. El documento se abre automáticamente después de una pausa breve al escribir; `Enter` lo abre de inmediato.
 2. Pega la ruta de la propuesta en la otra cabecera. La comparación empieza automáticamente al tener ambos archivos.
@@ -127,6 +130,18 @@ Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se 
 5. Usa `J` para el cambio siguiente y `K` para el anterior, o los botones de flechas. La navegación vuelve al principio al llegar al final.
 
 **Recargar**, junto a **Conectado**, vuelve a leer los archivos desde disco. También puedes repetir la llamada a la API o a MCP. No hay un observador automático de cambios en disco.
+
+### Pegar o subir documentos en hosted
+
+1. Entra con una cuenta admitida y elige **Pegar texto** o **Subir .md** en la cabecera de **Original**.
+2. Pega el contenido o selecciona un archivo `.md`/`.markdown` UTF-8 de hasta 2 MiB. Espera el estado **Abierto y guardado**.
+3. Aporta la **Propuesta** desde su cabecera; sus controles se habilitan al tener original. La comparación aparece automáticamente, sin un botón adicional.
+4. Para reemplazar cualquiera de los lados, repite la entrada en su cabecera. El otro lado se conserva.
+5. Usa **Cerrar texto** para volver a la lectura. Si hay un cambio pendiente, lo guarda antes de cerrar; si falla, el campo permanece abierto. Solo hay un campo de pegado activo.
+
+El texto se abre tras una pausa de 350 ms; cerrar el campo permite guardar de inmediato. Los controles de otras entradas quedan deshabilitados mientras haya un cambio pendiente o en curso. Un pegado completo conserva los saltos recibidos del portapapeles; una edición o un pegado parcial puede normalizarlos a LF. Los archivos conservan Unicode, BOM, CRLF y ausencia de salto final, y rechazan UTF-8 inválido. El nombre base se usa como etiqueta; no se envía una ruta para abrirla en el servidor.
+
+Un conflicto `409` conserva el trabajo vigente y el borrador de texto visible. Copia lo que quieras conservar y cierra/reabre el campo antes de reintentar; un archivo debe seleccionarse de nuevo. Los eventos SSE no cambian automáticamente la revisión de un borrador pendiente. Consulta [la guía de entradas manuales](docs/planning/manual-imports.md) para errores, sesiones y fidelidad del contenido.
 
 Los atajos no se activan mientras escribes en un campo. El tema se cambia desde **Modo claro** / **Modo oscuro** y se conserva en el mismo navegador. Un error al abrir una ruta mantiene el último documento o comparación válidos.
 
@@ -339,7 +354,7 @@ flowchart LR
 
 El servidor usa `axum` y `tokio`; el motor usa `pulldown-cmark`, `similar` y `ammonia`; MCP usa `rmcp`; la autenticación web usa `openidconnect`; la persistencia usa `rusqlite` con SQLite incorporado. `Cargo.lock` fija las versiones resueltas. Las aperturas se serializan por espacio; en hosted, el control optimista de revisión impide que una solicitud obsoleta sobrescriba el trabajo vigente. La transacción durable se confirma antes de publicar la nueva caché o el evento SSE.
 
-La interfaz agrupa las filas de 64 en 64 con `content-visibility: auto`. Todos los bloques permanecen en el DOM para lectura y búsqueda; el navegador puede omitir la composición de grupos fuera de pantalla.
+La interfaz agrupa las filas de 64 en 64 con `content-visibility: auto`. Todos los bloques permanecen en el DOM para lectura y búsqueda; el navegador puede omitir la composición de grupos fuera de pantalla. En hosted, las entradas manuales leen el archivo en el navegador y envían contenido JSON a `/api/work`, sin uploads multipart ni archivos temporales de importación en el servidor.
 
 ## Desarrollo y pruebas
 
@@ -389,7 +404,43 @@ La integración de la aplicación principal con un Keycloak sintético requiere 
 
 Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_persistence.py` para comprobar recuperación tras terminar el proceso, aislamiento, borrado, conflictos y fallos de escritura. Después retira la fixture como indica la guía.
 
-GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga, borrado y reconexión. No hay una suite automatizada de navegador incluida.
+GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`.
+
+### Pruebas de importación en navegador
+
+Node.js 20 o posterior con npm y Chromium se necesitan únicamente para las pruebas de desarrollo; no se añaden como requisitos del binario o del despliegue.
+
+1. Instala las dependencias de la suite:
+
+   ```sh
+   npm ci --prefix tests/browser
+   ```
+
+2. Prepara Chromium:
+
+   ```sh
+   npx --prefix tests/browser playwright install --with-deps chromium
+   ```
+
+3. Inicia la fixture Keycloak:
+
+   ```sh
+   python3 spikes/identity/keycloak.py up
+   ```
+
+4. Compila el binario:
+
+   ```sh
+   cargo build --release --locked
+   ```
+
+5. Ejecuta las pruebas de importación:
+
+   ```sh
+   python3 scripts/test_hosted_imports.py
+   ```
+
+Retira la fixture al terminar con `python3 spikes/identity/keycloak.py down`. Consulta [el procedimiento y los resultados locales](docs/planning/manual-imports.md#comprobar-con-un-navegador-real). La suite se verificó con Chrome y Playwright 1.62.1; Chromium está configurado para CI y no se afirma una corrida remota.
 
 Los cambios en `web/` requieren volver a compilar y reiniciar el servidor, porque los recursos se incorporan al binario. No hay un servidor de desarrollo JavaScript separado.
 
@@ -436,6 +487,8 @@ Estas cifras describen esos documentos y ese equipo. No son una garantía para r
 | El archivo está fuera de la carpeta autorizada | Inicia con un `--root` que contenga ambos documentos; comprueba también el destino de enlaces simbólicos. |
 | Hosted requiere un directorio de datos | Añade `--data-dir` con una carpeta privada fuera del repositorio; crea su padre si falta. |
 | El trabajo devuelve `409` | Lee `/api/work` y decide si reemplazas el contenido vigente; no fuerces un reintento con una revisión nueva. |
+| Un texto pegado entra en conflicto | Conserva el borrador, cierra/reabre el campo y vuelve a pegarlo para intentar contra el trabajo vigente. |
+| Una importación de archivo falla | Revisa extensión `.md`/`.markdown`, UTF-8 válido, nombre y límite de 2 MiB. El par anterior se conserva. |
 | No se puede guardar el trabajo | Comprueba permisos, espacio disponible y que una sola instancia use la base. Conserva el directorio de datos y no borres sus WAL/SHM para evitar el error. |
 | Una ruta relativa no se encuentra | Se resuelve respecto de `--root`, no respecto del navegador o del agente. |
 | Codex no encuentra `open_comparison` | Comprueba que mddiff esté iniciado, que `/mcp` use el mismo puerto y vuelve a conectar MCP o inicia una sesión nueva. |

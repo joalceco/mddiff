@@ -39,5 +39,13 @@ main{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden
 .review-bar:has(#delete-work:not([hidden])){height:auto;min-height:49px;gap:12px;padding-top:8px;padding-bottom:8px}
 #review-summary{min-width:0}
 #change-position{white-space:nowrap}
-@media(max-width:700px){.session-user{max-width:70px}}
+.source-actions{grid-column:1/-1;display:flex;gap:6px;flex-wrap:wrap}
+.pane-headers:has(.source-actions:not([hidden]))>div{align-content:start}
+.source-actions button{font-size:11px;padding:7px 8px}
+.paste-text{grid-column:1/-1;display:block;width:100%;min-height:110px;max-height:260px;resize:vertical;font:12px/1.6 var(--mono);border:1px solid var(--line);border-radius:4px;padding:9px;background:#fff;color:var(--accent)}
+.paste-text:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.import-status{grid-column:1/-1;font:10px/1.5 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.import-status.invalid{color:var(--red)}
+:root[data-theme=dark] .paste-text{background:#141516;color:var(--accent)}
+@media(max-width:700px){.session-user{max-width:70px;min-width:0}.header-actions{min-width:0}.version{display:none}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}

@@ -50,11 +50,25 @@
           <label for="base-path" class="pane-label">ORIGINAL</label>
           <strong id="base-name">Sin archivo</strong>
           <input id="base-path" class="pane-path" name="base_path" placeholder="Ruta del original.md" title="Ruta relativa a la carpeta autorizada o absoluta dentro de ella" required autocomplete="off" spellcheck="false">
+          <div id="base-source-actions" class="source-actions" hidden>
+            <button id="base-paste" type="button" aria-label="Pegar texto del original" aria-controls="base-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="base-upload" type="button" aria-label="Subir Markdown original" disabled>Subir .md</button>
+          </div>
+          <input id="base-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown original" hidden disabled>
+          <textarea id="base-text" class="paste-text" rows="4" aria-label="Markdown del original" aria-describedby="base-import-status" placeholder="Pega aquí el Markdown del original…" spellcheck="false" hidden></textarea>
+          <span id="base-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
         <div id="candidate-header">
           <label for="candidate-path" class="pane-label">PROPUESTA</label>
           <strong id="candidate-name">Sin archivo</strong>
           <input id="candidate-path" class="pane-path" name="candidate_path" placeholder="Ruta de la propuesta.md" title="La comparación se abre automáticamente al indicar ambos archivos" autocomplete="off" spellcheck="false">
+          <div id="candidate-source-actions" class="source-actions" hidden>
+            <button id="candidate-paste" type="button" aria-label="Pegar texto de la propuesta" aria-controls="candidate-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="candidate-upload" type="button" aria-label="Subir Markdown propuesto" disabled>Subir .md</button>
+          </div>
+          <input id="candidate-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown propuesto" hidden disabled>
+          <textarea id="candidate-text" class="paste-text" rows="4" aria-label="Markdown de la propuesta" aria-describedby="candidate-import-status" placeholder="Pega aquí el Markdown de la propuesta…" spellcheck="false" hidden></textarea>
+          <span id="candidate-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
       </div>
       <section id="empty" class="empty-state">

@@ -27,12 +27,18 @@ jobs:
         run: python3 scripts/test_mcp.py
       - name: Test local and hosted mode boundaries
         run: python3 scripts/test_modes.py
+      - name: Install browser test dependencies
+        run: npm ci --prefix tests/browser
+      - name: Install test Chromium
+        run: npx --prefix tests/browser playwright install --with-deps chromium
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test hosted authentication
         run: python3 scripts/test_hosted_auth.py
       - name: Test durable work and process recovery
         run: python3 scripts/test_hosted_persistence.py
+      - name: Test hosted text and Markdown imports in Chromium
+        run: python3 scripts/test_hosted_imports.py
       - name: Remove synthetic Keycloak
         if: always()
         run: python3 spikes/identity/keycloak.py down
