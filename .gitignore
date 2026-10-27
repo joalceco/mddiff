@@ -1,4 +1,5 @@
 /target/
+/spikes/identity/target/
 
 # Local review artifacts; screenshots can contain private documents and paths.
 /docs/preview*.png
