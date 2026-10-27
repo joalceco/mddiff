@@ -12,17 +12,19 @@ use rmcp::{
 };
 use serde_json::json;
 
-use crate::{App, CompareRequest};
+use crate::CompareRequest;
+use mddiff::local::LocalReader;
 
 #[derive(Clone)]
 pub struct MarkdownMcp {
-    app: Arc<App>,
+    reader: Arc<LocalReader>,
+    port: u16,
 }
 
 #[tool_router]
 impl MarkdownMcp {
-    fn new(app: Arc<App>) -> Self {
-        Self { app }
+    fn new(reader: Arc<LocalReader>, port: u16) -> Self {
+        Self { reader, port }
     }
 
     #[tool(
@@ -38,7 +40,7 @@ impl MarkdownMcp {
         Parameters(request): Parameters<CompareRequest>,
     ) -> CallToolResult {
         let snapshot = match self
-            .app
+            .reader
             .open(request.base_path, Some(request.candidate_path))
             .await
         {
@@ -50,7 +52,7 @@ impl MarkdownMcp {
             .as_ref()
             .expect("a successful comparison has content");
         CallToolResult::structured(json!({
-            "viewer_url": format!("http://127.0.0.1:{}/", self.app.port),
+            "viewer_url": format!("http://127.0.0.1:{}/", self.port),
             "base_path": snapshot.base_path,
             "candidate_path": snapshot.candidate_path,
             "revision": snapshot.revision,
@@ -69,18 +71,21 @@ impl ServerHandler for MarkdownMcp {
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
                 "Usa open_comparison para comparar dos Markdown sin modificar archivos. El visor abierto se actualiza automáticamente. Tras una llamada correcta, muestra viewer_url en el navegador de Codex si aún no está visible. Las rutas se resuelven dentro de {}. Los errores conservan la comparación anterior.",
-                self.app.root.display()
+                self.reader.root().display()
             ))
     }
 }
 
-pub fn service(app: Arc<App>) -> StreamableHttpService<MarkdownMcp, LocalSessionManager> {
+pub fn service(
+    reader: Arc<LocalReader>,
+    port: u16,
+) -> StreamableHttpService<MarkdownMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_max_request_body_bytes(16 * 1024);
     StreamableHttpService::new(
-        move || Ok(MarkdownMcp::new(Arc::clone(&app))),
+        move || Ok(MarkdownMcp::new(Arc::clone(&reader), port)),
         Arc::new(LocalSessionManager::default()),
         config,
     )

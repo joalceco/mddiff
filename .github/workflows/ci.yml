@@ -25,3 +25,5 @@ jobs:
         run: cargo +stable build --release --locked
       - name: Test MCP and viewer updates
         run: python3 scripts/test_mcp.py
+      - name: Test local and hosted mode boundaries
+        run: python3 scripts/test_modes.py

@@ -85,17 +85,32 @@ La interfaz está incorporada en el binario. No necesitas copiar `web/` para eje
 ### Opciones de línea de comandos
 
 ```text
-mddiff [--root CARPETA] [--port PUERTO] [original.md propuesta.md]
+mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [original.md propuesta.md]
 ```
 
 | Argumento | Valor predeterminado | Descripción |
 | --- | --- | --- |
+| `--mode local\|hosted` | `local` | Selecciona las capacidades del proceso. El modo alojado sigue cerrado hasta integrar autenticación. |
 | `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el servidor. |
 | `--port PUERTO` | `3847` | Puerto HTTP. `0` solicita uno libre; la terminal muestra la URL asignada. |
 | `original.md propuesta.md` | Sin documentos | Abre una comparación inicial. Se aceptan dos rutas o ninguna. |
 | `--help`, `-h` | — | Muestra el uso y termina. |
 
 Para leer un solo archivo, inicia sin rutas y usa el visor o `POST /api/open`.
+
+### Modos local y alojado
+
+El modo **local** es el predeterminado. Conserva el lector, la API de archivos, el MCP local y las validaciones de `--root` descritos en este README.
+
+El modo **hosted** es una base de arquitectura, todavía sin autenticación integrada:
+
+```sh
+cargo run --release --locked -- --mode hosted --port 3848
+```
+
+En este modo no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o el MCP local. La CLI rechaza `--root` y rutas posicionales. Estado y eventos requieren una identidad verificada insertada por código del servidor; headers, cookies o un `owner_id` del cliente no la crean. Sin el futuro adaptador de autenticación, esos endpoints devuelven `401`. El proceso sigue limitado a loopback.
+
+Cada identidad interna (`issuer`, `subject`) obtiene su propio snapshot, bloqueo de apertura y canal de revisiones. El almacenamiento continúa en memoria. Este avance no es todavía una aplicación multiusuario utilizable ni un despliegue público. Véase [la separación de modos y estado](docs/planning/user-workspaces.md).
 
 ## Usar el visor
 
@@ -281,7 +296,9 @@ flowchart LR
 
 | Archivo | Responsabilidad |
 | --- | --- |
-| `src/main.rs` | CLI, lectura validada, rutas HTTP, estado compartido, SSE y controles de acceso local. |
+| `src/main.rs` | CLI, selección de modo, rutas HTTP, resolución de identidad, SSE y controles de acceso local. |
+| `src/local.rs` | Capacidad de lectura de archivos locales, canonicalización, límites y apertura en el espacio local. |
+| `src/workspace.rs` | Identidad interna, registro de espacios por usuario, snapshots, coordinación y revisiones por espacio. |
 | `src/diff.rs` | Markdown, conservación de fuente, alineamiento de bloques, detalle por palabras y saneamiento HTML. |
 | `src/mcp.rs` | Adaptador MCP y herramienta `open_comparison` sobre la misma operación de apertura. |
 | `web/` | Interfaz HTML, CSS y JavaScript, incorporada al compilar con `include_str!`. |
@@ -327,6 +344,14 @@ Las pruebas Rust están junto al código y usan documentos sintéticos. Comprueb
    ```
 
 La integración inicia un servidor temporal en un puerto libre y cubre inicialización, descubrimiento de herramientas, comparación, notificación SSE, errores de rutas y argumentos, límites de petición, Host/Origin y conservación de los archivos. No utiliza la comparación que puedas tener abierta en el puerto 3847.
+
+La separación de modos también se comprueba con un servidor temporal:
+
+```sh
+python3 scripts/test_modes.py
+```
+
+Esta prueba verifica CLI local predeterminada y explícita, modos inválidos, ausencia de endpoints de archivos en hosted, rechazo de identidades inventadas, controles HTTP y archivos intactos. Las pruebas Rust ejercitan dos propietarios internos y sus handlers de estado/SSE con identidades de prueba insertadas por código, sin convertir headers de usuarios en credenciales.
 
 GitHub Actions ejecuta estas mismas comprobaciones. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga y reconexión. No hay una suite automatizada de navegador incluida.
 

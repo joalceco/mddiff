@@ -1,8 +1,7 @@
-mod diff;
 mod mcp;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
@@ -13,171 +12,54 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::stream;
-use rmcp::schemars;
-use serde::{Deserialize, Serialize};
-use std::{
-    convert::Infallible,
-    env,
-    ffi::OsString,
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+use mddiff::{
+    AppError,
+    local::LocalReader,
+    workspace::{Snapshot, VerifiedIdentity, Workspace, Workspaces},
 };
-use tokio::sync::{Mutex, RwLock, watch};
-
-const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
+use rmcp::schemars;
+use serde::Deserialize;
+use std::{convert::Infallible, env, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-#[derive(Serialize)]
-struct Snapshot {
-    revision: u64,
-    base_path: Option<String>,
-    candidate_path: Option<String>,
-    comparison: Option<diff::Comparison>,
-    processing_ms: f64,
+enum Mode {
+    Local(Arc<LocalReader>),
+    Hosted(Workspaces),
 }
 
 struct App {
-    root: PathBuf,
     port: u16,
-    snapshot: RwLock<Arc<Snapshot>>,
-    updates: Mutex<()>,
-    revisions: watch::Sender<u64>,
+    mode: Mode,
 }
 
 impl App {
-    fn new(root: PathBuf, port: u16) -> Self {
-        let (revisions, _) = watch::channel(0);
-        Self {
-            root,
-            port,
-            snapshot: RwLock::new(Arc::new(Snapshot {
-                revision: 0,
-                base_path: None,
-                candidate_path: None,
-                comparison: None,
-                processing_ms: 0.0,
-            })),
-            updates: Mutex::new(()),
-            revisions,
+    fn local_reader(&self) -> Result<&Arc<LocalReader>, AppError> {
+        match &self.mode {
+            Mode::Local(reader) => Ok(reader),
+            Mode::Hosted(_) => Err(AppError(
+                StatusCode::NOT_FOUND,
+                "Las rutas locales no están disponibles en modo alojado.".into(),
+            )),
         }
     }
 
-    async fn open(
+    async fn workspace(
         &self,
-        base: PathBuf,
-        candidate: Option<PathBuf>,
-    ) -> Result<Arc<Snapshot>, AppError> {
-        // Serialize requests so an earlier, slower comparison cannot replace a later one.
-        let _update = self.updates.lock().await;
-        let started = Instant::now();
-        let root = self.root.clone();
-        let (base_path, candidate_path, comparison) = tokio::task::spawn_blocking(move || {
-            let (base_path, original) = read_document(&root, &base)?;
-            let (candidate_path, comparison) = if let Some(candidate) = candidate {
-                let (candidate_path, proposed) = read_document(&root, &candidate)?;
-                (Some(candidate_path), diff::compare(&original, &proposed))
-            } else {
-                (None, diff::compare(&original, &original))
-            };
-            Ok::<_, AppError>((base_path, candidate_path, comparison))
-        })
-        .await
-        .map_err(|_| AppError::internal("No se pudo procesar el documento."))??;
-
-        let revision = self.snapshot.read().await.revision + 1;
-        let snapshot = Arc::new(Snapshot {
-            revision,
-            base_path: Some(base_path),
-            candidate_path,
-            comparison: Some(comparison),
-            processing_ms: started.elapsed().as_secs_f64() * 1000.0,
-        });
-        *self.snapshot.write().await = Arc::clone(&snapshot);
-        self.revisions.send_replace(revision);
-        Ok(snapshot)
+        identity: Option<Extension<VerifiedIdentity>>,
+    ) -> Result<Arc<Workspace>, AppError> {
+        match &self.mode {
+            Mode::Local(reader) => Ok(reader.workspace()),
+            Mode::Hosted(store) => {
+                let Extension(identity) = identity.ok_or_else(|| {
+                    AppError(
+                        StatusCode::UNAUTHORIZED,
+                        "El modo alojado requiere una identidad autenticada.".into(),
+                    )
+                })?;
+                Ok(store.for_user(&identity).await)
+            }
+        }
     }
-}
-
-#[derive(Debug)]
-struct AppError(StatusCode, String);
-
-impl AppError {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, message.into())
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self(StatusCode::INTERNAL_SERVER_ERROR, message.into())
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
-    }
-}
-
-fn read_document(root: &Path, requested: &Path) -> Result<(String, String), AppError> {
-    let path = root
-        .join(requested)
-        .canonicalize()
-        .map_err(|error| AppError::bad_request(format!("No se pudo abrir el archivo: {error}")))?;
-    if !path.starts_with(root) {
-        return Err(AppError::bad_request(
-            "El archivo debe estar dentro de la carpeta autorizada.",
-        ));
-    }
-    if !path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
-        })
-    {
-        return Err(AppError::bad_request(
-            "Selecciona un archivo .md o .markdown.",
-        ));
-    }
-    let metadata = path
-        .metadata()
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(AppError::bad_request(
-            "La ruta debe señalar un archivo normal.",
-        ));
-    }
-    if metadata.len() > MAX_DOCUMENT_BYTES {
-        return Err(AppError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Cada documento admite hasta 2 MiB.".into(),
-        ));
-    }
-    let file = File::open(&path).map_err(|error| AppError::bad_request(error.to_string()))?;
-    if !file
-        .metadata()
-        .map_err(|error| AppError::bad_request(error.to_string()))?
-        .is_file()
-    {
-        return Err(AppError::bad_request(
-            "La ruta debe señalar un archivo normal.",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_DOCUMENT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| AppError::bad_request(format!("No se pudo leer el archivo: {error}")))?;
-    if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
-        return Err(AppError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Cada documento admite hasta 2 MiB.".into(),
-        ));
-    }
-    let source = String::from_utf8(bytes)
-        .map_err(|_| AppError::bad_request("El documento debe usar codificación UTF-8."))?;
-    Ok((path.to_string_lossy().into_owned(), source))
 }
 
 fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(), AppError> {
@@ -275,8 +157,11 @@ fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, AppErro
     })
 }
 
-async fn get_state(State(app): State<Arc<App>>) -> Json<Arc<Snapshot>> {
-    Json(Arc::clone(&*app.snapshot.read().await))
+async fn get_state(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    Ok(Json(app.workspace(identity).await?.snapshot().await))
 }
 
 async fn open_document(
@@ -284,7 +169,7 @@ async fn open_document(
     payload: Result<Json<OpenRequest>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let request = json_payload(payload)?;
-    app.open(request.path, None).await.map(Json)
+    app.local_reader()?.open(request.path, None).await.map(Json)
 }
 
 async fn compare_documents(
@@ -292,14 +177,19 @@ async fn compare_documents(
     payload: Result<Json<CompareRequest>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let request = json_payload(payload)?;
-    app.open(request.base_path, Some(request.candidate_path))
+    app.local_reader()?
+        .open(request.base_path, Some(request.candidate_path))
         .await
         .map(Json)
 }
 
-async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
+async fn events(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = app.workspace(identity).await?;
     let events = stream::unfold(
-        (app.revisions.subscribe(), true),
+        (workspace.subscribe(), true),
         |(mut receiver, first)| async move {
             if !first && receiver.changed().await.is_err() {
                 return None;
@@ -311,15 +201,15 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
             Some((Ok::<_, Infallible>(event), (receiver, false)))
         },
     );
-    Sse::new(events).keep_alive(
+    Ok(Sse::new(events).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
 
 fn router(app: Arc<App>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
@@ -343,17 +233,29 @@ fn router(app: Arc<App>) -> Router {
             }),
         )
         .route("/api/state", get(get_state))
-        .route("/api/open", post(open_document))
-        .route("/api/compare", post(compare_documents))
-        .route("/api/events", get(events))
-        .route_service("/mcp", mcp::service(Arc::clone(&app)))
+        .route("/api/events", get(events));
+    let router = match &app.mode {
+        Mode::Local(reader) => router
+            .route("/api/open", post(open_document))
+            .route("/api/compare", post(compare_documents))
+            .route_service("/mcp", mcp::service(Arc::clone(reader), app.port)),
+        Mode::Hosted(_) => router,
+    };
+    router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), security))
         .with_state(app)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CliMode {
+    Local,
+    Hosted,
+}
+
 struct Arguments {
-    root: PathBuf,
+    mode: CliMode,
+    root: Option<PathBuf>,
     port: u16,
     documents: Vec<PathBuf>,
 }
@@ -363,18 +265,28 @@ fn parse_arguments(
 ) -> Result<Option<Arguments>, String> {
     let mut arguments = arguments.into_iter();
     let mut options = Arguments {
-        root: PathBuf::from("."),
+        mode: CliMode::Local,
+        root: None,
         port: 3847,
         documents: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h") => return Ok(None),
+            Some("--mode") => {
+                options.mode = match arguments.next().as_deref().and_then(|s| s.to_str()) {
+                    Some("local") => CliMode::Local,
+                    Some("hosted") => CliMode::Hosted,
+                    _ => return Err("Usa --mode local o --mode hosted.".into()),
+                };
+            }
             Some("--root") => {
-                options.root = arguments
-                    .next()
-                    .ok_or("Falta la ruta después de --root.")?
-                    .into()
+                options.root = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta la ruta después de --root.")?
+                        .into(),
+                )
             }
             Some("--port") => {
                 let port = arguments
@@ -391,6 +303,10 @@ fn parse_arguments(
             _ => options.documents.push(argument.into()),
         }
     }
+    if options.mode == CliMode::Hosted && (options.root.is_some() || !options.documents.is_empty())
+    {
+        return Err("El modo alojado no admite --root ni rutas de archivos locales.".into());
+    }
     if !matches!(options.documents.len(), 0 | 2) {
         return Err("Indica dos archivos para comparar, o ninguno para abrir el lector.".into());
     }
@@ -402,27 +318,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--root CARPETA] [--port PUERTO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere un adaptador de identidad; sin él, estado y eventos rechazan el acceso."
         );
         return Ok(());
     };
-    let root = arguments.root.canonicalize()?;
-    if !root.is_dir() {
-        return Err(std::io::Error::other("--root debe señalar una carpeta.").into());
-    }
+    let mode = match arguments.mode {
+        CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
+            arguments.root.unwrap_or_else(|| PathBuf::from(".")),
+        )?)),
+        CliMode::Hosted => Mode::Hosted(Workspaces::default()),
+    };
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let app = Arc::new(App::new(root, port));
+    let app = Arc::new(App { mode, port });
     if let [base, candidate] = arguments.documents.as_slice() {
-        app.open(base.clone(), Some(candidate.clone()))
+        app.local_reader()?
+            .open(base.clone(), Some(candidate.clone()))
             .await
             .map_err(|error| std::io::Error::other(error.1))?;
     }
-    println!(
-        "MDdiff: http://127.0.0.1:{port}\nCarpeta autorizada: {}",
-        app.root.display()
-    );
+    println!("MDdiff: http://127.0.0.1:{port}");
+    match &app.mode {
+        Mode::Local(reader) => println!("Carpeta autorizada: {}", reader.root().display()),
+        Mode::Hosted(_) => {
+            println!("Modo alojado: acceso cerrado hasta integrar el adaptador de identidad.")
+        }
+    }
     // The read-only server can stop immediately instead of waiting for open SSE streams.
     tokio::select! {
         result = async { axum::serve(listener, router(app)).await } => result?,
@@ -434,65 +356,117 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use futures_util::StreamExt;
+    use mddiff::workspace::Document;
+    use tower::ServiceExt;
 
-    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path = env::temp_dir().join(format!(
-                "mddiff-{}-{}",
-                std::process::id(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
-        }
+    fn identity(subject: &str) -> VerifiedIdentity {
+        VerifiedIdentity::from_verified_claims("synthetic-issuer".into(), subject.into()).unwrap()
     }
 
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    fn request(path: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:3847")
+            .header("x-user-id", "bob")
+            .header(header::AUTHORIZATION, "Bearer fabricated")
+            .body(Body::empty())
+            .unwrap()
     }
 
-    #[test]
-    fn rejects_unsafe_files_and_accepts_markdown() {
-        let directory = TestDirectory::new();
-        let root = directory.0.join("authorized");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("valid.MD"), "# Hola\n").unwrap();
-        fs::write(directory.0.join("outside.md"), "secret").unwrap();
-        fs::write(root.join("script.html"), "<script>").unwrap();
-        fs::write(root.join("invalid.md"), [0xff]).unwrap();
-        fs::create_dir(root.join("directory.md")).unwrap();
-        let large = File::create(root.join("large.md")).unwrap();
-        large.set_len(MAX_DOCUMENT_BYTES + 1).unwrap();
-
-        assert_eq!(
-            read_document(&root, Path::new("valid.MD")).unwrap().1,
-            "# Hola\n"
-        );
-        for path in [
-            "../outside.md",
-            "script.html",
-            "invalid.md",
-            "directory.md",
-            "large.md",
-        ] {
-            assert!(
-                read_document(&root, Path::new(path)).is_err(),
-                "accepted {path}"
+    #[tokio::test]
+    async fn hosted_handlers_require_trusted_context_and_scope_state_and_events() {
+        let app = Arc::new(App {
+            port: 3847,
+            mode: Mode::Hosted(Workspaces::default()),
+        });
+        assert!(app.local_reader().is_err());
+        for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
+            assert_eq!(
+                router(Arc::clone(&app))
+                    .oneshot(request(path))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
             );
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(directory.0.join("outside.md"), root.join("escape.md"))
+        let alice = app
+            .workspace(Some(Extension(identity("alice"))))
+            .await
+            .unwrap();
+        let alice_router = router(Arc::clone(&app)).layer(Extension(identity("alice")));
+        let bob_router = router(Arc::clone(&app)).layer(Extension(identity("bob")));
+        let mut alice_events = alice_router
+            .clone()
+            .oneshot(request("/api/events"))
+            .await
+            .unwrap()
+            .into_body()
+            .into_data_stream();
+        let mut bob_events = bob_router
+            .clone()
+            .oneshot(request("/api/events"))
+            .await
+            .unwrap()
+            .into_body()
+            .into_data_stream();
+        for stream in [&mut alice_events, &mut bob_events] {
+            let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
                 .unwrap();
-            assert!(read_document(&root, Path::new("escape.md")).is_err());
+            assert!(
+                std::str::from_utf8(&first)
+                    .unwrap()
+                    .lines()
+                    .any(|l| l.strip_prefix("data:").is_some_and(|n| n.trim() == "0"))
+            );
+        }
+        alice
+            .replace_content(
+                Document {
+                    label: "alice.md".into(),
+                    markdown: "# Alice\n".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let changed = tokio::time::timeout(Duration::from_secs(1), alice_events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&changed)
+                .unwrap()
+                .lines()
+                .any(|l| l.strip_prefix("data:").is_some_and(|n| n.trim() == "1"))
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), bob_events.next())
+                .await
+                .is_err()
+        );
+        for (router, expected_revision, expected_label) in
+            [(alice_router, 1, Some("alice.md")), (bob_router, 0, None)]
+        {
+            let response = router
+                .oneshot(request("/api/state?owner_id=bob"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let state: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(state["revision"], expected_revision);
+            assert_eq!(state["base_path"].as_str(), expected_label);
         }
     }
 
@@ -522,30 +496,6 @@ mod tests {
         headers.remove("sec-fetch-site");
         headers.insert(header::HOST, HeaderValue::from_static("evil.example:3847"));
         assert!(validate_request(&Method::GET, &headers, 3847).is_err());
-    }
-
-    #[tokio::test]
-    async fn failed_open_preserves_document_and_revision() {
-        let directory = TestDirectory::new();
-        fs::write(directory.0.join("base.md"), "# Original\n").unwrap();
-        fs::write(directory.0.join("candidate.md"), "# Propuesta\n").unwrap();
-        let app = App::new(directory.0.clone(), 3847);
-        let mut revisions = app.revisions.subscribe();
-        let opened = app.open("base.md".into(), None).await.unwrap();
-        assert_eq!(opened.revision, 1);
-        assert!(opened.candidate_path.is_none());
-        assert!(revisions.has_changed().unwrap());
-        assert_eq!(*revisions.borrow_and_update(), 1);
-        assert!(app.open("missing.md".into(), None).await.is_err());
-        assert!(Arc::ptr_eq(&opened, &*app.snapshot.read().await));
-        assert!(!revisions.has_changed().unwrap());
-        let compared = app
-            .open("base.md".into(), Some("candidate.md".into()))
-            .await
-            .unwrap();
-        assert_eq!(compared.revision, 2);
-        assert!(compared.candidate_path.is_some());
-        assert_eq!(*revisions.borrow_and_update(), 2);
     }
 
     #[test]
