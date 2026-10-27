@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-27. Issue: [#4](https://github.com/joalceco/mddiff/issues/4). Rama: `feature/multiuser-sources`.
 
+Este documento registra la entrega S03. S04 incorpora persistencia y exige también `--data-dir`; consulta [el trabajo actual y su borrado](current-work.md) para el contrato vigente. Las sesiones OIDC siguen en memoria.
+
 ## Resultado y alcance
 
 La aplicación principal incorpora un adaptador OIDC para autenticar sesiones web contra Keycloak. Después de verificar la sesión y la admisión, el servidor obtiene el espacio privado asociado al par estable `issuer` + `sub`. El nombre visible y el email no deciden la propiedad del espacio.
@@ -15,7 +17,7 @@ La integración se verificó el 2026-10-27 contra Keycloak 26.8.1 con cuentas si
 El modo local sigue siendo el predeterminado y no consume configuración OIDC. Para activar el adaptador web:
 
 ```sh
-cargo run --release --locked -- --mode hosted --port 3848 --oidc-config "$HOME/.config/mddiff/oidc.json"
+cargo run --release --locked -- --mode hosted --port 3848 --oidc-config "$HOME/.config/mddiff/oidc.json" --data-dir "$HOME/.local/share/mddiff"
 ```
 
 El JSON debe estar fuera del repositorio, en un archivo normal, sin enlaces simbólicos, con permisos `0600` en Unix y un máximo de 16 KiB. No lo adjuntes a issues, logs o capturas. El proceso rechaza configuraciones mal formadas o campos desconocidos.

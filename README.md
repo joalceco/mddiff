@@ -85,7 +85,7 @@ La interfaz está incorporada en el binario. No necesitas copiar `web/` para eje
 ### Opciones de línea de comandos
 
 ```text
-mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [original.md propuesta.md]
+mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [original.md propuesta.md]
 ```
 
 | Argumento | Valor predeterminado | Descripción |
@@ -94,6 +94,7 @@ mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARC
 | `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el modo local. No se acepta en hosted. |
 | `--port PUERTO` | `3847` | Puerto HTTP. `0` solicita uno libre; la terminal muestra la URL asignada. |
 | `--oidc-config ARCHIVO` | Sin configuración | JSON privado del proveedor Keycloak; solo se acepta en hosted. |
+| `--data-dir CARPETA` | Sin directorio | Obligatorio en hosted para el trabajo actual persistente. No se acepta en local. |
 | `original.md propuesta.md` | Sin documentos | Abre una comparación inicial. Se aceptan dos rutas o ninguna. |
 | `--help`, `-h` | — | Muestra el uso y termina. |
 
@@ -103,17 +104,19 @@ Para leer un solo archivo, inicia sin rutas y usa el visor o `POST /api/open`.
 
 El modo **local** es el predeterminado. Conserva el lector, la API de archivos, el MCP local y las validaciones de `--root` descritos en este README.
 
-El modo **hosted** integra login web OIDC con Keycloak mediante Authorization Code + PKCE. Su configuración JSON debe estar fuera del repositorio, en un archivo normal con permisos `0600`:
+El modo **hosted** integra login web OIDC con Keycloak mediante Authorization Code + PKCE y conserva el trabajo actual de cada persona en SQLite. Requiere un directorio de datos privado y su configuración OIDC; ambos deben estar fuera del repositorio. El archivo JSON requiere permisos `0600` y el directorio de datos, `0700` en Unix. La aplicación crea la carpeta final si falta; su padre debe existir:
 
 ```sh
-cargo run --release --locked -- --mode hosted --port 3848 --oidc-config "$HOME/.config/mddiff/oidc.json"
+cargo run --release --locked -- --mode hosted --port 3848 \
+  --oidc-config "$HOME/.config/mddiff/oidc.json" \
+  --data-dir "$HOME/.local/share/mddiff"
 ```
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La importación de texto/archivos y el MCP alojado siguen pendientes.
+Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open`, `POST /api/compare` o `/mcp`; la CLI rechaza `--root` y rutas posicionales. La importación desde la interfaz y el MCP alojado siguen pendientes; la API del trabajo acepta contenido Markdown, sin abrir rutas del host.
 
-Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Estado y sesiones continúan en memoria hasta implementar persistencia; reiniciar el proceso los elimina. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [la guía de configuración y verificación de autenticación alojada](docs/planning/hosted-auth.md) y [la separación de modos y estado](docs/planning/user-workspaces.md).
+Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [la persistencia y API del trabajo actual](docs/planning/current-work.md), [la autenticación alojada](docs/planning/hosted-auth.md) y [la separación de modos y estado](docs/planning/user-workspaces.md).
 
 ## Usar el visor
 
@@ -128,6 +131,8 @@ Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Estado y
 Los atajos no se activan mientras escribes en un campo. El tema se cambia desde **Modo claro** / **Modo oscuro** y se conserva en el mismo navegador. Un error al abrir una ruta mantiene el último documento o comparación válidos.
 
 En modo local, todas las pestañas conectadas al mismo proceso comparten la comparación actual. Para revisar pares locales independientes, inicia procesos con puertos distintos. En hosted, el espacio lo decide la identidad verificada y las pestañas de una misma persona comparten su espacio.
+
+En hosted, **Borrar trabajo**, en la barra de revisión, solicita una confirmación cancelable y elimina el original y la propuesta vigentes. La nueva revisión vacía también las pestañas conectadas de esa persona. El borrado conserva el contador de revisión para rechazar solicitudes anteriores; sus límites de eliminación física se explican en [la política del trabajo actual](docs/planning/current-work.md#borrado-funcional-copias-y-retención).
 
 ### Interpretar el diff
 
@@ -191,7 +196,7 @@ La herramienta cambia el estado del visor y no escribe archivos. No necesita aut
 
 ## API HTTP
 
-Todos los ejemplos de apertura usan el modo local, el puerto predeterminado y el servidor iniciado desde el repositorio con `--root .`. Hosted no registra esos endpoints de archivos; sus rutas de sesión y acceso al estado se describen en [la guía de autenticación](docs/planning/hosted-auth.md).
+Todos los ejemplos de apertura por rutas usan el modo local, el puerto predeterminado y el servidor iniciado desde el repositorio con `--root .`. Hosted no registra esos endpoints de archivos; sus rutas de sesión se describen en [la guía de autenticación](docs/planning/hosted-auth.md) y sus operaciones de contenido, en [la API del trabajo actual](docs/planning/current-work.md#api-del-trabajo-actual).
 
 ### Abrir un documento
 
@@ -229,14 +234,26 @@ curl --no-buffer http://127.0.0.1:3847/api/events
 | `GET /api/events` | Sin cuerpo | Flujo SSE con eventos `revision`. |
 | `/mcp` | Protocolo MCP Streamable HTTP | Inicialización, descubrimiento y llamada de herramientas MCP. |
 
-Los POST de la API requieren `Content-Type: application/json`. Rechazan campos desconocidos. El cuerpo de cada solicitud admite hasta 16 KiB; el contenido de los documentos se lee desde las rutas, no se envía en ese JSON.
+Los POST locales requieren `Content-Type: application/json` y rechazan campos desconocidos. El cuerpo de esas solicitudes admite hasta 16 KiB; el contenido de los documentos se lee desde las rutas, no se envía en ese JSON.
+
+### Trabajo actual en hosted
+
+| Endpoint | Uso |
+| --- | --- |
+| `GET /api/work` | Lee `{revision, base, candidate}` con el contenido actual de la persona autenticada. |
+| `PUT /api/work` | Reemplaza el trabajo con `{expected_revision, base, candidate}`. Cada documento contiene `label` y `markdown`; la propuesta puede ser `null`. |
+| `DELETE /api/work` | Borra ambos lados usando `{expected_revision}`; mantiene el contador incrementado. |
+
+PUT y DELETE requieren una sesión admitida, Origin exacto y su token CSRF. Devuelven un snapshot como `/api/state`; un conflicto de revisión devuelve `409` y no sobrescribe el trabajo. Un fallo de almacenamiento devuelve `503` y conserva el último estado publicado.
+
+Cada documento admite 2 MiB y cada etiqueta, entre 1 y 255 bytes UTF-8 sin caracteres de control. La petición de `/api/work` admite 24 MiB + 16 KiB para los escapes de JSON; este margen no amplía el tamaño de cada documento. Consulta [los ejemplos de revisión y recuperación](docs/planning/current-work.md#ejemplo-de-revisión-esperada).
 
 ### Estructura del snapshot
 
 | Campo | Descripción |
 | --- | --- |
-| `revision` | Número de actualización, empieza en `0` y se reinicia con el proceso. |
-| `base_path`, `candidate_path` | Rutas absolutas resueltas. Son `null` cuando no hay documento en ese lado. |
+| `revision` | Número de actualización. En local se reinicia con el proceso; en hosted persiste y aumenta incluso al borrar. |
+| `base_path`, `candidate_path` | Rutas absolutas resueltas en local; etiquetas de presentación en hosted, sin acceso al sistema de archivos. Son `null` cuando no hay documento en ese lado. |
 | `comparison` | Objeto con `rows`, `added`, `removed` y `source_equal`; inicialmente es `null`. |
 | `processing_ms` | Tiempo de procesamiento en Rust, en milisegundos. |
 
@@ -254,16 +271,20 @@ Los errores de apertura de la API usan un cuerpo como `{"error":"El archivo debe
 | --- | --- |
 | `400` | Ruta inexistente, fuera de la raíz, tipo de archivo incorrecto, UTF-8 inválido o JSON mal formado. |
 | `403` | Host, Origin o solicitud entre sitios no permitidos. |
+| `409` | Revisión esperada obsoleta al reemplazar o borrar el trabajo alojado. |
 | `413` | Documento de más de 2 MiB o solicitud demasiado grande. |
 | `415` | Content-Type distinto de `application/json`. |
 | `422` | JSON válido que no cumple el contrato de campos. |
 | `500` | Fallo interno al procesar el documento. |
+| `503` | Almacenamiento alojado o proveedor de identidad no disponible. |
 
 ## Privacidad y límites de confianza
 
 En modo local, el visor lee archivos y mantiene la comparación en memoria. No guarda documentos, no incorpora llamadas a modelos ni envía contenido a servicios de análisis. El tema es la única preferencia que la interfaz escribe en `localStorage`. Reiniciar el servidor elimina su estado en memoria; puedes abrir de nuevo los archivos o indicarlos al arrancar.
 
-En hosted, las sesiones y los espacios privados también permanecen en memoria. Los tokens del IdP se guardan en el backend y no se exponen al navegador. El archivo OIDC contiene secretos y debe mantenerse fuera del checkout, con permisos privados. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO.
+En hosted, SQLite conserva únicamente el trabajo actual por persona: original, propuesta, etiquetas y revisión. El HTML y el diff se recalculan al recuperarlo. Las sesiones y tokens del IdP permanecen en memoria en el backend y no se exponen al navegador. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO ni borra el trabajo persistente.
+
+El archivo OIDC y el directorio de datos deben permanecer fuera del checkout, con permisos privados. La base guarda el Markdown en claro; los permisos no equivalen a cifrado. Borrar elimina el contenido recuperable por la aplicación, pero WAL, copias, snapshots y el SSD pueden conservar bytes anteriores. No se crean backups automáticos ni se ha fijado una retención: esa política debe cerrarse antes del despliegue público. Consulta [los límites del borrado y las copias](docs/planning/current-work.md#borrado-funcional-copias-y-retención).
 
 La interfaz se sirve desde el propio binario, usa fuentes del sistema y bloquea la carga de imágenes. Abrir un enlace externo del documento lleva al destino elegido en una pestaña nueva. La política de datos del agente o cliente MCP que utilices es independiente de mddiff.
 
@@ -291,6 +312,8 @@ El repositorio contiene código, dependencias fijadas, ejemplos sintéticos, scr
 
 ## Arquitectura
 
+El recorrido de archivos del modo local es:
+
 ```mermaid
 flowchart LR
     Agent[Agente o script] -->|MCP o API HTTP| Server[Servidor Rust local]
@@ -307,13 +330,14 @@ flowchart LR
 | `src/auth.rs` | Configuración OIDC, login Keycloak, sesiones web opacas, introspección, admisión, CSRF y logout local. |
 | `src/local.rs` | Capacidad de lectura de archivos locales, canonicalización, límites y apertura en el espacio local. |
 | `src/workspace.rs` | Identidad interna, registro de espacios por usuario, snapshots, coordinación y revisiones por espacio. |
+| `src/storage.rs` | SQLite privado para el último trabajo por identidad, transacciones, control de revisión y borrado funcional. |
 | `src/diff.rs` | Markdown, conservación de fuente, alineamiento de bloques, detalle por palabras y saneamiento HTML. |
 | `src/mcp.rs` | Adaptador MCP y herramienta `open_comparison` sobre la misma operación de apertura. |
 | `web/` | Interfaz HTML, CSS y JavaScript, incorporada al compilar con `include_str!`. |
 | `scripts/` | Integración MCP y medición reproducible de rendimiento, con Python estándar. |
 | `examples/` | Dos documentos de demostración que se pueden comparar. |
 
-El servidor usa `axum` y `tokio`; el motor usa `pulldown-cmark`, `similar` y `ammonia`; MCP usa `rmcp`; la autenticación web usa `openidconnect`. `Cargo.lock` fija las versiones resueltas. Las aperturas se serializan para que una solicitud anterior y lenta no sustituya el resultado de otra posterior.
+El servidor usa `axum` y `tokio`; el motor usa `pulldown-cmark`, `similar` y `ammonia`; MCP usa `rmcp`; la autenticación web usa `openidconnect`; la persistencia usa `rusqlite` con SQLite incorporado. `Cargo.lock` fija las versiones resueltas. Las aperturas se serializan por espacio; en hosted, el control optimista de revisión impide que una solicitud obsoleta sobrescriba el trabajo vigente. La transacción durable se confirma antes de publicar la nueva caché o el evento SSE.
 
 La interfaz agrupa las filas de 64 en 64 con `content-visibility: auto`. Todos los bloques permanecen en el DOM para lectura y búsqueda; el navegador puede omitir la composición de grupos fuera de pantalla.
 
@@ -363,7 +387,9 @@ Esta prueba verifica CLI local predeterminada y explícita, modos inválidos, au
 
 La integración de la aplicación principal con un Keycloak sintético requiere Docker y una fixture local. Sigue los comandos `up`, compilación, `scripts/test_hosted_auth.py` y `down` de [la guía de autenticación alojada](docs/planning/hosted-auth.md#comprobar-con-la-fixture-sintética). Esta comprobación cubre sesiones, admisión, logout/CSRF, caducidad, revocación y cierre del SSE; no valida Google/GitHub.
 
-GitHub Actions ejecuta formato, análisis estático, pruebas Rust e integraciones de MCP local y separación de modos. La prueba con Keycloak se ejecuta explícitamente con su fixture. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga y reconexión. No hay una suite automatizada de navegador incluida.
+Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_persistence.py` para comprobar recuperación tras terminar el proceso, aislamiento, borrado, conflictos y fallos de escritura. Después retira la fixture como indica la guía.
+
+GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. La interfaz debe revisarse también en un navegador: temas, modos, navegación, selección automática de rutas, recarga, borrado y reconexión. No hay una suite automatizada de navegador incluida.
 
 Los cambios en `web/` requieren volver a compilar y reiniciar el servidor, porque los recursos se incorporan al binario. No hay un servidor de desarrollo JavaScript separado.
 
@@ -398,7 +424,7 @@ Estas cifras describen esos documentos y ese equipo. No son una garantía para r
 
 - El alineamiento exacto de bloques dispone de 100 ms. El emparejamiento por similitud y el detalle por palabras comparten otros 100 ms. Estos presupuestos no limitan todo el procesamiento.
 - La búsqueda de parejas similares admite hasta **16 384 parejas candidatas por grupo**. Si el grupo supera ese tamaño o se agota el tiempo, se conserva el emparejamiento por posición; el resultado puede ser menos preciso.
-- No incluye edición, aceptación o guardado de cambios, historial persistente, integración con Git ni seguimiento automático de archivos en disco.
+- No incluye edición, aceptación o guardado de cambios en los archivos originales, historial recuperable, integración con Git ni seguimiento automático de archivos en disco. Hosted conserva únicamente el par vigente por persona.
 - No incluye empaquetado nativo, sincronización, resaltado de sintaxis de código, Mermaid o fórmulas matemáticas dentro de los documentos.
 - No se han verificado lectores de pantalla ni Windows. La interfaz ofrece etiquetas y controles por teclado, pero esa implementación no sustituye una prueba de accesibilidad.
 
@@ -408,6 +434,9 @@ Estas cifras describen esos documentos y ese equipo. No son una garantía para r
 | --- | --- |
 | El puerto está ocupado | Usa otro valor de `--port` y actualiza las URLs del navegador y MCP. |
 | El archivo está fuera de la carpeta autorizada | Inicia con un `--root` que contenga ambos documentos; comprueba también el destino de enlaces simbólicos. |
+| Hosted requiere un directorio de datos | Añade `--data-dir` con una carpeta privada fuera del repositorio; crea su padre si falta. |
+| El trabajo devuelve `409` | Lee `/api/work` y decide si reemplazas el contenido vigente; no fuerces un reintento con una revisión nueva. |
+| No se puede guardar el trabajo | Comprueba permisos, espacio disponible y que una sola instancia use la base. Conserva el directorio de datos y no borres sus WAL/SHM para evitar el error. |
 | Una ruta relativa no se encuentra | Se resuelve respecto de `--root`, no respecto del navegador o del agente. |
 | Codex no encuentra `open_comparison` | Comprueba que mddiff esté iniciado, que `/mcp` use el mismo puerto y vuelve a conectar MCP o inicia una sesión nueva. |
 | El documento cambió en disco y la vista sigue igual | Pulsa **Recargar** o repite la llamada de apertura. |

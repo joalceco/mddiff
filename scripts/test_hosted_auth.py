@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the main hosted server against the isolated synthetic Keycloak fixture."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import json
 from pathlib import Path
@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
@@ -146,27 +147,28 @@ class Browser:
 
 
 @contextmanager
-def running(binary, base, config_path):
+def running(binary, base, config_path, data_dir=None):
     port = urlsplit(base).port
-    process = subprocess.Popen(
-        [str(binary), "--mode", "hosted", "--port", str(port), "--oidc-config", str(config_path)],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    try:
-        check(bool(select.select([process.stdout], [], [], 10)[0]), "Hosted server did not announce its URL.")
-        check(process.stdout.readline().strip() == "MDdiff: " + base, "Hosted server did not start at the configured loopback origin.")
-        yield
-    finally:
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
+    with (tempfile.TemporaryDirectory(prefix="mddiff-auth-data-") if data_dir is None else nullcontext(data_dir)) as directory:
+        process = subprocess.Popen(
+            [str(binary), "--mode", "hosted", "--port", str(port), "--oidc-config", str(config_path), "--data-dir", str(directory)],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-            raise CheckFailed("Hosted server did not stop after SIGINT.") from None
-        process.stdout.close()
-        process.stderr.close()
+            check(bool(select.select([process.stdout], [], [], 10)[0]), "Hosted server did not announce its URL.")
+            check(process.stdout.readline().strip() == "MDdiff: " + base, "Hosted server did not start at the configured loopback origin.")
+            yield
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                raise CheckFailed("Hosted server did not stop after SIGINT.") from None
+            process.stdout.close()
+            process.stderr.close()
 
 
 @contextmanager

@@ -27,3 +27,12 @@ jobs:
         run: python3 scripts/test_mcp.py
       - name: Test local and hosted mode boundaries
         run: python3 scripts/test_modes.py
+      - name: Start synthetic Keycloak
+        run: python3 spikes/identity/keycloak.py up
+      - name: Test hosted authentication
+        run: python3 scripts/test_hosted_auth.py
+      - name: Test durable work and process recovery
+        run: python3 scripts/test_hosted_persistence.py
+      - name: Remove synthetic Keycloak
+        if: always()
+        run: python3 spikes/identity/keycloak.py down

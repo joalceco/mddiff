@@ -70,6 +70,8 @@ def main():
 
         for arguments in [
             ["--mode", "invalid"],
+            ["--mode", "hosted"],
+            ["--mode", "local", "--data-dir", str(root / "forbidden-data")],
             ["--mode", "hosted", "--root", "."],
             ["--mode", "hosted", "--root", str(root / "missing-root")],
             ["--mode", "hosted", "base.md", "proposal.md"],
@@ -97,8 +99,8 @@ def main():
                     assert text.encode() == source, "Local CLI changed the source."
 
         # The working directory contains Markdown, but hosted mode must not expose its reader.
-        with running(binary, root, ["--mode", "hosted"]) as url:
-            for path in ["/api/state", "/api/events"]:
+        with running(binary, root, ["--mode", "hosted", "--data-dir", str(root / "hosted-data")]) as url:
+            for path in ["/api/state", "/api/events", "/api/work"]:
                 for suffix, headers in [
                     ("", {}),
                     ("", {"X-User-Id": "alice"}),

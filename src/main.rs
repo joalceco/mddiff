@@ -16,7 +16,7 @@ use futures_util::stream;
 use mddiff::{
     AppError,
     local::LocalReader,
-    workspace::{Snapshot, VerifiedIdentity, Workspace, Workspaces},
+    workspace::{Document, Snapshot, VerifiedIdentity, Work, Workspace, Workspaces},
 };
 use rmcp::schemars;
 use serde::Deserialize;
@@ -58,7 +58,7 @@ impl App {
                         "El modo alojado requiere una identidad autenticada.".into(),
                     )
                 })?;
-                Ok(store.for_user(&identity).await)
+                store.for_user(&identity).await
             }
         }
     }
@@ -92,11 +92,11 @@ fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(
             "Solicitud entre sitios no autorizada.".into(),
         ));
     }
-    require_json_post(method, headers)
+    require_json_body(method, headers)
 }
 
-fn require_json_post(method: &Method, headers: &HeaderMap) -> Result<(), AppError> {
-    if method == Method::POST {
+fn require_json_body(method: &Method, headers: &HeaderMap) -> Result<(), AppError> {
+    if matches!(*method, Method::POST | Method::PUT | Method::DELETE) {
         let content_type = headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
@@ -173,6 +173,53 @@ async fn get_state(
     identity: Option<Extension<VerifiedIdentity>>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     Ok(Json(app.workspace(identity).await?.snapshot().await))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceWork {
+    expected_revision: u64,
+    base: Document,
+    candidate: Option<Document>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearWork {
+    expected_revision: u64,
+}
+
+async fn get_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+) -> Result<Json<Arc<Work>>, AppError> {
+    Ok(Json(app.workspace(identity).await?.work().await))
+}
+
+async fn replace_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    payload: Result<Json<ReplaceWork>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let request = json_payload(payload)?;
+    app.workspace(identity)
+        .await?
+        .replace_if_revision(request.expected_revision, request.base, request.candidate)
+        .await
+        .map(Json)
+}
+
+async fn clear_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    payload: Result<Json<ClearWork>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let request = json_payload(payload)?;
+    app.workspace(identity)
+        .await?
+        .clear_if_revision(request.expected_revision)
+        .await
+        .map(Json)
 }
 
 async fn open_document(
@@ -280,7 +327,13 @@ fn router(app: Arc<App>) -> Router {
             .route("/api/open", post(open_document))
             .route("/api/compare", post(compare_documents))
             .route_service("/mcp", mcp::service(Arc::clone(reader), app.port)),
-        Mode::Hosted(_) => router,
+        Mode::Hosted(_) => router.route(
+            "/api/work",
+            get(get_work)
+                .put(replace_work)
+                .delete(clear_work)
+                .layer(DefaultBodyLimit::max(24 * 1024 * 1024 + 16 * 1024)),
+        ),
     };
     let router = if app.auth.is_some() {
         router
@@ -308,6 +361,7 @@ struct Arguments {
     mode: CliMode,
     root: Option<PathBuf>,
     oidc_config: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     port: u16,
     documents: Vec<PathBuf>,
 }
@@ -320,6 +374,7 @@ fn parse_arguments(
         mode: CliMode::Local,
         root: None,
         oidc_config: None,
+        data_dir: None,
         port: 3847,
         documents: Vec::new(),
     };
@@ -338,6 +393,14 @@ fn parse_arguments(
                     arguments
                         .next()
                         .ok_or("Falta el archivo después de --oidc-config.")?
+                        .into(),
+                );
+            }
+            Some("--data-dir") => {
+                options.data_dir = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta la carpeta después de --data-dir.")?
                         .into(),
                 );
             }
@@ -371,6 +434,12 @@ fn parse_arguments(
     if options.mode == CliMode::Local && options.oidc_config.is_some() {
         return Err("--oidc-config solo está disponible en modo alojado.".into());
     }
+    if (options.mode == CliMode::Hosted) != options.data_dir.is_some() {
+        return Err(
+            "El modo hosted requiere --data-dir CARPETA; el modo local no admite esa opción."
+                .into(),
+        );
+    }
     if !matches!(options.documents.len(), 0 | 2) {
         return Err("Indica dos archivos para comparar, o ninguno para abrir el lector.".into());
     }
@@ -382,7 +451,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nUsa --oidc-config con Keycloak en hosted; sin configuración, estado y eventos rechazan el acceso."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado."
         );
         return Ok(());
     };
@@ -396,7 +465,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
             arguments.root.unwrap_or_else(|| PathBuf::from(".")),
         )?)),
-        CliMode::Hosted => Mode::Hosted(Workspaces::default()),
+        CliMode::Hosted => Mode::Hosted(Workspaces::persistent(
+            arguments.data_dir.as_deref().unwrap(),
+        )?),
     };
     let listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
@@ -422,7 +493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     }
-    // The read-only server can stop immediately instead of waiting for open SSE streams.
+    // Open SSE streams must not block shutdown; SQLite recovers incomplete transactions.
     tokio::select! {
         result = async { axum::serve(listener, router(app)).await } => result?,
         result = tokio::signal::ctrl_c() => result?,
@@ -591,6 +662,9 @@ mod tests {
             vec!["--port", "invalid"],
             vec!["--root"],
             vec!["--oidc-config"],
+            vec!["--data-dir"],
+            vec!["--mode", "hosted"],
+            vec!["--mode", "local", "--data-dir", "private-data"],
             vec!["--mode", "local", "--oidc-config", "private.json"],
             vec!["--unknown"],
         ] {

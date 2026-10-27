@@ -13,5 +13,11 @@
 *.pem
 *.key
 *.log
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
 .DS_Store
 __pycache__/

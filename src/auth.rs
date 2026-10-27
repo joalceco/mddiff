@@ -275,7 +275,7 @@ impl Authenticator {
                 "Solicitud entre sitios no autorizada.",
             ));
         }
-        crate::require_json_post(method, headers)
+        crate::require_json_body(method, headers)
     }
 
     fn secure(&self) -> bool {

@@ -27,16 +27,18 @@ let authentication = null;
 let hosted = false;
 let events = null;
 
-async function request(path, body) {
+async function request(path, body, method = "POST") {
   const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json", ...(authentication ? { "X-CSRF-Token": authentication.csrf_token } : {}) }, body: JSON.stringify(body),
+    method, headers: { "Content-Type": "application/json", ...(authentication ? { "X-CSRF-Token": authentication.csrf_token } : {}) }, body: JSON.stringify(body),
   });
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = null; }
   if (!response.ok) {
     if (hosted && [401, 403].includes(response.status)) endSession();
-    throw new Error(data?.error || data?.message || text || `Error ${response.status}`);
+    const error = new Error(data?.error || data?.message || text || `Error ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -48,7 +50,7 @@ function showError(error) {
 
 function setBusy(value) {
   busy = value;
-  for (const id of ["reload-button", "example-button"]) {
+  for (const id of ["reload-button", "example-button", "delete-work"]) {
     $(id).disabled = value;
     $(id).setAttribute("aria-busy", String(value));
   }
@@ -165,6 +167,11 @@ function render() {
   $("empty").hidden = hasDocument;
   $("review-bar").hidden = !hasDocument;
   $("document-view").hidden = !hasDocument;
+  $("delete-work").hidden = !hosted || !authentication || !hasDocument;
+  if (hosted) {
+    $("pane-headers").hidden = !hasDocument;
+    $("base-path").hidden = $("candidate-path").hidden = true;
+  }
   $("document-view").classList.toggle("reading", !isDiff);
   $("rows").classList.toggle("source", format === "source");
   setBusy(busy);
@@ -173,9 +180,20 @@ function render() {
     $(id).classList.toggle(["reading-tab", "diff-tab"].includes(id) ? "active" : "selected", selected);
     $(id).setAttribute("aria-pressed", String(selected));
   }
-  $("base-name").textContent = fileName(session?.base_path) || "Sin archivo";
-  $("candidate-name").textContent = fileName(session?.candidate_path) || "Sin archivo";
-  if (!hasDocument) return;
+  $("base-name").textContent = (hosted ? session?.base_path : fileName(session?.base_path)) || "Sin archivo";
+  $("candidate-name").textContent = (hosted ? session?.candidate_path : fileName(session?.candidate_path)) || "Sin archivo";
+  if (!hasDocument) {
+    changes = [];
+    changeIndex = -1;
+    $("rows").replaceChildren();
+    $("review-summary").replaceChildren();
+    $("change-badge").hidden = true;
+    if (hosted && authentication) {
+      $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
+      $("timing").textContent = "Espacio privado";
+    }
+    return;
+  }
   const fragment = document.createDocumentFragment();
   let rowGroup;
   changes = [];
@@ -243,6 +261,18 @@ for (const id of ["base-path", "candidate-path"]) {
 }
 $("reload-button").addEventListener("click", () => openFiles());
 $("example-button").addEventListener("click", () => openFiles(true));
+$("delete-work").addEventListener("click", async () => {
+  if (!hosted || !authentication || busy || !session?.comparison) return;
+  const expectedRevision = session.revision;
+  if (!window.confirm("¿Borrar el original y la propuesta actuales?\nEsta acción vacía tu trabajo. No se puede deshacer desde mddiff.")) return;
+  setBusy(true);
+  try { applySession(await request("/api/work", { expected_revision: expectedRevision }, "DELETE")); }
+  catch (error) {
+    if (error.status === 409) await refresh();
+    showError(error);
+  }
+  finally { setBusy(false); }
+});
 $("reading-tab").addEventListener("click", () => { if (view === "reading") return; view = "reading"; render(); });
 $("diff-tab").addEventListener("click", () => { if (view === "diff") return; view = "diff"; render(); });
 $("rendered-tab").addEventListener("click", () => { if (format === "rendered") return; format = "rendered"; render(); });

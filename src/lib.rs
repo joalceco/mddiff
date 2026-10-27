@@ -1,5 +1,6 @@
 mod diff;
 pub mod local;
+mod storage;
 pub mod workspace;
 
 use axum::{
