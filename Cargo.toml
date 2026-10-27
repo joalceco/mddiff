@@ -1,0 +1,18 @@
+[package]
+name = "mddiff"
+version = "0.1.0"
+edition = "2024"
+description = "Local Markdown reader with rendered side-by-side diffs, an HTTP API, and MCP."
+readme = "README.md"
+repository = "https://github.com/joalceco/mddiff"
+
+[dependencies]
+ammonia = "4"
+axum = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+pulldown-cmark = "0.13.5"
+rmcp = { version = "3.7.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+similar = "3.2.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "signal", "time"] }

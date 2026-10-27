@@ -1,0 +1,16 @@
+/target/
+
+# Local review artifacts; screenshots can contain private documents and paths.
+/docs/preview*.png
+/docs/committee.md
+/private/
+/comparaciones/
+
+# Local configuration, credentials and generated files.
+.env
+.env.*
+*.pem
+*.key
+*.log
+.DS_Store
+__pycache__/

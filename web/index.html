@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>mddiff · Leer y comparar Markdown</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="mddiff, inicio"><span class="brand-mark" aria-hidden="true">m<span>±</span></span>mddiff <span class="version">PMV</span></a>
+    <span class="header-caption">Una segunda mirada a tus documentos.</span>
+    <div class="header-actions">
+      <span id="connection" class="connection" role="status">Conectando…</span>
+      <button id="reload-button" type="button" title="Volver a leer los archivos desde disco" disabled>↻ Recargar</button>
+      <button id="theme-toggle" type="button">Modo claro</button>
+    </div>
+  </header>
+  <div class="workspace">
+    <main>
+      <div class="toolbar">
+        <div class="view-tabs" role="group" aria-label="Vista del documento">
+          <button id="reading-tab" class="view-tab active" aria-pressed="true">Lectura</button>
+          <button id="diff-tab" class="view-tab" aria-pressed="false" disabled>Comparación <span id="change-badge" hidden>0</span></button>
+        </div>
+        <div class="format-switch" role="group" aria-label="Formato">
+          <button id="rendered-tab" class="selected" aria-pressed="true">Markdown</button>
+          <button id="source-tab" aria-pressed="false">Fuente</button>
+        </div>
+      </div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div id="review-bar" class="review-bar" hidden>
+        <div id="review-summary" role="status"></div>
+        <div id="change-navigation" class="change-navigation" hidden>
+          <span id="change-position">0 / 0</span>
+          <button id="previous-change" class="icon-button" title="Cambio anterior (K)" aria-label="Cambio anterior">↑</button>
+          <button id="next-change" class="icon-button" title="Cambio siguiente (J)" aria-label="Cambio siguiente">↓</button>
+        </div>
+      </div>
+      <div id="pane-headers" class="pane-headers">
+        <div>
+          <label for="base-path" class="pane-label">ORIGINAL</label>
+          <strong id="base-name">Sin archivo</strong>
+          <input id="base-path" class="pane-path" name="base_path" placeholder="Ruta del original.md" title="Ruta relativa a la carpeta autorizada o absoluta dentro de ella" required autocomplete="off" spellcheck="false">
+        </div>
+        <div id="candidate-header">
+          <label for="candidate-path" class="pane-label">PROPUESTA</label>
+          <strong id="candidate-name">Sin archivo</strong>
+          <input id="candidate-path" class="pane-path" name="candidate_path" placeholder="Ruta de la propuesta.md" title="La comparación se abre automáticamente al indicar ambos archivos" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <section id="empty" class="empty-state">
+        <div class="empty-symbol" aria-hidden="true"><span>−</span><span>+</span></div>
+        <span class="small-label">LEE. COMPARA. DECIDE.</span>
+        <h1>El documento, con perspectiva.</h1>
+        <p>Tu Markdown original a la izquierda.<br>La propuesta de la IA a la derecha.<br>Cada cambio, en su contexto.</p>
+        <ol><li>Pega la ruta del original en su cabecera.</li><li>Añade la ruta de la propuesta para comparar automáticamente.</li></ol>
+        <button id="example-button" class="secondary">Probar con un ejemplo <span aria-hidden="true">→</span></button>
+      </section>
+      <section id="document-view" aria-label="Documento Markdown" hidden>
+        <div id="document-scroll" class="document-scroll" tabindex="0" aria-label="Contenido; usa J y K para navegar cambios">
+          <div id="rows" class="rows"></div>
+        </div>
+      </section>
+      <footer class="status-bar"><span id="document-status">Markdown, sin distracciones.</span><span id="timing">Sin servicios externos</span></footer>
+    </main>
+  </div>
+</body>
+</html>
