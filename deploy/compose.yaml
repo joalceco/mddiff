@@ -12,6 +12,7 @@ services:
     security_opt: [no-new-privileges:true]
     pids_limit: 128
     mem_limit: 512m
+    memswap_limit: 512m
     cpus: 1.0
     restart: unless-stopped
     stop_grace_period: 15s

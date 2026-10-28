@@ -58,9 +58,10 @@ class Client:
         check(message.get("event") == event and (phase is None or message.get("phase") == phase), "The isolated container client returned an unexpected protocol event.")
         return message
 
-    def phase(self, phase, **fields):
-        self.send({"phase": phase, **fields}); self.receive("passed", phase)
+    def phase(self, phase, timeout=60, **fields):
+        self.send({"phase": phase, **fields}); message = self.receive("passed", phase, timeout=timeout)
         print("Container check passed: " + phase, flush=True)
+        return message
 
     def close(self):
         if self.process.poll() is None:
@@ -148,7 +149,7 @@ def audit_compose():
               and any(value in {"no-new-privileges", "no-new-privileges:true"} for value in service["security_opt"]),
               "Compose weakened the runtime identity, read-only root or privilege protections.")
         check(all(Decimal(str(service[field])) == expected for field, expected in
-                  (("pids_limit", 128), ("mem_limit", 512 * 1024 * 1024), ("cpus", 1))), "Compose lost its process, memory or CPU limits.")
+                  (("pids_limit", 128), ("mem_limit", 512 * 1024 * 1024), ("memswap_limit", 512 * 1024 * 1024), ("cpus", 1))), "Compose lost its process, memory, swap or CPU limits.")
         mounts = {item["target"]: item for item in service["volumes"]}
         targets = {"/var/lib/mddiff", *("/run/secrets/mddiff/" + name for name in ("oidc.json", "connections.json", "connections.key"))}
         check(set(mounts) == targets and len(service["volumes"]) == len(targets)
@@ -170,6 +171,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="mddiff:issue13")
     parser.add_argument("--client-image", default=CLIENT_IMAGE)
+    parser.add_argument("--capacity", action="store_true", help="Run ten private sessions under the Compose resource limits.")
     arguments = parser.parse_args()
     identity = "mddiff-e2e-" + uuid.uuid4().hex[:12]
     containers, volumes = [], []
@@ -204,7 +206,8 @@ def main():
             volumes.append(name); mapping[suffix] = (name, target)
         with tempfile.TemporaryDirectory(prefix="mddiff-container-ca-") as temporary:
             ca, certificate, key = certificates(Path(temporary))
-            payload = {"runtime": runtime, "tls": {"ca.pem": ca.read_text(), "server.pem": certificate.read_text(), "server.key": key.read_text()}}
+            payload = {"runtime": runtime, "capacity": arguments.capacity,
+                       "tls": {"ca.pem": ca.read_text(), "server.pem": certificate.read_text(), "server.key": key.read_text()}}
             client_name = identity + "-client"
             command = ["docker", "run", "--name", client_name, "--label", LABEL + "=" + identity, "--network", network,
                        "--interactive", "--env", "PYTHONDONTWRITEBYTECODE=1", "--workdir", "/suite"]
@@ -221,7 +224,7 @@ def main():
             def create(name, data="data", configuration="secrets", port=3847):
                 command = ["create", "--name", name, "--label", LABEL + "=" + identity, "--network", network,
                     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-                    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m"]
+                    "--init", "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--pids-limit", "128"]
                 if data != "data":
                     command += ["--workdir", "/"]  # Let the app itself reject inaccessible data instead of failing Docker's initial chdir.
                 command += [
@@ -232,6 +235,8 @@ def main():
                 docker(*command); containers.append(name)
                 info = json.loads(docker("inspect", name).stdout)[0]
                 host = info["HostConfig"]
+                check(host["Memory"] == host["MemorySwap"] == 512 * 1024 * 1024 and host["NanoCpus"] == 1_000_000_000
+                      and host["PidsLimit"] == 128 and host["Init"] is True, "Docker did not configure the intended resource limits.")
                 check(info["Config"]["User"] == "10001:10001" and host["ReadonlyRootfs"] and "ALL" in host["CapDrop"]
                       and any(option.startswith("no-new-privileges") for option in host["SecurityOpt"])
                       and host["NetworkMode"] == network and not host.get("PortBindings"), "App container lost its isolation settings.")
@@ -250,7 +255,52 @@ def main():
 
             app = identity + "-app"
             phase = "two accounts in the container"
-            create(app); client.phase("first")
+            create(app); bootstrap = client.phase("first", timeout=120 if arguments.capacity else 60)
+            if arguments.capacity:
+                phase = "ten-user resource-limited workload"
+                report = {"users": 10, "memory_limit_bytes": 512 * 1024 * 1024, "cpu_limit": 1, "pids_limit": 128,
+                          "image_id": tested_image, "profiles": [], "status": "running", "bootstrap": bootstrap["metrics"]}
+                output = ROOT / "target/capacity-report.json"
+                check(docker("exec", app, "cat", "/sys/fs/cgroup/memory.max").stdout.strip() == b"536870912"
+                      and docker("exec", app, "cat", "/sys/fs/cgroup/memory.swap.max").stdout.strip() == b"0"
+                      and docker("exec", app, "cat", "/sys/fs/cgroup/pids.max").stdout.strip() == b"128", "Linux cgroups did not enforce the declared limits.")
+                quota, period = docker("exec", app, "cat", "/sys/fs/cgroup/cpu.max").stdout.split()
+                check(quota == period, "Linux cgroups did not enforce the one-CPU quota.")
+                report["cgroup_limits_verified"] = True
+                fixture.private_write(output, json.dumps(report, indent=2) + "\n")
+                for profile in ("small", "near-limit"):
+                    report["profiles"].append(client.phase("load", profile=profile, timeout=180)["metrics"])
+                    peak = docker("exec", app, "cat", "/sys/fs/cgroup/memory.peak").stdout.strip()
+                    report["profiles"][-1]["cgroup_memory_peak_bytes"] = int(peak)
+                    fixture.private_write(output, json.dumps(report, indent=2) + "\n")
+                client.phase("limits", timeout=120)
+                report["concurrent_render_rejections"] = 10
+                report["memory_peak_bytes"] = int(docker("exec", app, "cat", "/sys/fs/cgroup/memory.peak").stdout.strip())
+                info = json.loads(docker("info", "--format", "{{json .}}").stdout)
+                report["environment"] = {key: info[key] for key in ("Architecture", "OSType", "NCPU", "MemTotal", "ServerVersion", "CgroupVersion")}
+                phase = "ten-user recovery"
+                stop(app); docker("start", app); client.phase("restart", timeout=120)
+                report["restart_memory_peak_bytes"] = int(docker("exec", app, "cat", "/sys/fs/cgroup/memory.peak").stdout.strip())
+                stop(app); docker("rm", app); containers.remove(app)
+                app = identity + "-recreated"; create(app); client.phase("recreated", timeout=120)
+                report["recreated_memory_peak_bytes"] = int(docker("exec", app, "cat", "/sys/fs/cgroup/memory.peak").stdout.strip())
+                report["memory_peak_bytes"] = max(report[key] for key in ("memory_peak_bytes", "restart_memory_peak_bytes", "recreated_memory_peak_bytes"))
+                stop(app)
+                report["isolation_and_limits"] = "passed"
+                report["restart_and_recreation"] = "passed"
+                idp_state = json.loads(docker("inspect", fixture.NAME).stdout)[0]["State"]
+                check(idp_state["Running"] and not idp_state["OOMKilled"], "The identity fixture stopped or exceeded its own memory budget during capacity validation.")
+                report["idp_fixture_oom"] = False
+                report["status"] = "passed" if all(profile["latency_threshold_passed"] for profile in report["profiles"]) else "latency-failed"
+                report["memory_peak_ceiling_bytes"] = 460 * 1024 * 1024
+                if report["memory_peak_bytes"] > report["memory_peak_ceiling_bytes"]:
+                    report["status"] = "memory-margin-failed"
+                fixture.private_write(output, json.dumps(report, indent=2) + "\n")
+                client.send({"phase": "quit"}); client.receive("closed")
+                check(client.process.wait(timeout=15) == 0, "Capacity client failed to restore synthetic OAuth configuration.")
+                check(report["status"] == "passed", "Ten-user latency or memory margin exceeded its threshold; aggregate evidence remains in target/capacity-report.json.")
+                print("Ten-user capacity integration passed; aggregate-only report: target/capacity-report.json", flush=True)
+                return
             check(docker("exec", app, "id", "-u").stdout.strip() == b"10001", "The app is not running as the configured unprivileged user.")
             check(docker("exec", app, "touch", "/run/secrets/mddiff/forbidden", required=False).returncode != 0, "External secrets are writable inside the app.")
             check(docker("exec", app, "curl", "--fail", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", "http://127.0.0.1:3847/healthz").stdout == b"204", "Image-local public health failed.")

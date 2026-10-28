@@ -128,7 +128,7 @@ El repositorio incluye un Dockerfile con bases fijadas por digest y Compose para
 
 `deploy/compose.yaml` no publica puertos del host. Para un proxy en el host, `deploy/compose.loopback.yaml` publica solo `127.0.0.1:3847`; el proxy termina HTTPS y conserva el origen canónico. `GET` y `HEAD /healthz` permiten comprobar preparación sin documentos ni credenciales. Salud no comprueba continuamente la disponibilidad del IdP.
 
-Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). Esta entrega no configura DNS, router, certificados o cluster, ni demuestra todavía capacidad de diez usuarios o un despliegue público.
+Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. Esta entrega no configura DNS, router, certificados o cluster ni demuestra una instalación pública real.
 
 ## Usar el visor
 
@@ -448,7 +448,7 @@ Las conexiones personales se verifican con `python3 scripts/test_connections.py`
 
 La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sintéticas y `node tests/browser/memos.mjs` para el contrato de pantalla. No consulta notas privadas reales. La persistencia incorpora esquema 3 para la procedencia; consulta [la guía de captura](docs/planning/memos-source.md).
 
-El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. Consulta [el procedimiento y el estado de su evidencia](docs/planning/container-deployment.md#verificar-el-empaquetado); su existencia no demuestra publicación o capacidad de diez usuarios.
+El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. Consulta [el procedimiento y el estado de su evidencia](docs/planning/container-deployment.md#verificar-el-empaquetado); su existencia no demuestra publicación. La opción `--capacity` comprueba diez sesiones y guarda un informe agregado privado; consulta [el método, las cuotas y los límites de esa medición](docs/planning/capacity-validation.md).
 
 ### Pruebas de importación en navegador
 

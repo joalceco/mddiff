@@ -13,11 +13,11 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use mddiff::{
     AppError,
     local::LocalReader,
-    workspace::{Document, Snapshot, VerifiedIdentity, Work, Workspace, Workspaces},
+    workspace::{Document, RequestKind, Snapshot, VerifiedIdentity, Work, Workspace, Workspaces},
 };
 use rmcp::schemars;
 use serde::Deserialize;
@@ -141,6 +141,11 @@ async fn security(
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -169,6 +174,45 @@ async fn health(State(app): State<Arc<App>>) -> StatusCode {
         }
         _ => StatusCode::SERVICE_UNAVAILABLE,
     }
+}
+
+async fn quotas(
+    State(app): State<Arc<App>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp")
+        || path.starts_with("/api/sources/");
+    let permits = match (&app.mode, request.extensions().get::<VerifiedIdentity>()) {
+        (Mode::Hosted(store), Some(identity)) if protected_content => {
+            let kind = if path == "/api/events" {
+                RequestKind::Events
+            } else if path.starts_with("/api/sources/") {
+                RequestKind::Source
+            } else {
+                RequestKind::Content
+            };
+            match store.request_permits(identity, kind).await {
+                Ok(permits) => permits,
+                Err(error) => {
+                    let mut response = error.into_response();
+                    response
+                        .headers_mut()
+                        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                    return response;
+                }
+            }
+        }
+        _ => return next.run(request).await,
+    };
+    let response = next.run(request).await;
+    response.map(|body| {
+        axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _keep_capacity = &permits;
+            chunk
+        }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -388,6 +432,7 @@ fn router(app: Arc<App>) -> Router {
             .merge(auth::routes())
             .merge(providers::routes())
             .route("/mcp", axum::routing::any(mcp::hosted_service))
+            .layer(middleware::from_fn_with_state(Arc::clone(&app), quotas))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&app),
                 auth::authenticate,

@@ -118,12 +118,18 @@ def tls_proxy(directory, backend_port):
             connection = HTTPConnection("127.0.0.1", backend_port, timeout=30)
             started = False
             try:
-                body = self.rfile.read(length) if length else None
                 connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
                 for name, value in self.headers.raw_items():
                     if name.lower() not in hop and not name.lower().startswith("x-forwarded-") and name.lower() != "forwarded":
                         connection.putheader(name, value)
-                connection.endheaders(body)
+                connection.endheaders()
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        raise OSError("Synthetic proxy body ended early.")
+                    connection.send(chunk)
+                    remaining -= len(chunk)
                 upstream = connection.getresponse()
                 self.send_response(upstream.status)
                 for name, value in upstream.getheaders():
@@ -146,6 +152,7 @@ def tls_proxy(directory, backend_port):
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
+        request_queue_size = 64
 
         def handle_error(self, *args):
             pass

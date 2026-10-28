@@ -2,7 +2,7 @@
 
 Issue: [#13](https://github.com/joalceco/mddiff/issues/13). Rama: `feature/multiuser-sources`.
 
-Esta entrega prepara una instancia de mddiff para ejecutarse detrás de un proxy HTTPS. Incluye imagen, Compose, ejemplos de configuración, endpoint de salud y comprobaciones sintéticas. No publica el servicio ni configura DNS, certificados, router o cluster. El despliegue por invitación pertenece a [S14](https://github.com/joalceco/mddiff/issues/15); Google/GitHub y la prueba de capacidad de diez usuarios siguen pendientes.
+Esta entrega prepara una instancia de mddiff para ejecutarse detrás de un proxy HTTPS. Incluye imagen, Compose, ejemplos de configuración, endpoint de salud y comprobaciones sintéticas. No publica el servicio ni configura DNS, certificados, router o cluster. El despliegue por invitación pertenece a [S14](https://github.com/joalceco/mddiff/issues/15); Google/GitHub sigue pendiente. [S13](capacity-validation.md) añade cuotas y la medición sintética de diez sesiones.
 
 Todos los dominios y rutas de este documento son ejemplos. Mantén la configuración de la instalación, sus credenciales y datos fuera del repositorio y del contexto de compilación.
 
@@ -11,7 +11,7 @@ Todos los dominios y rutas de este documento son ejemplos. Mantén la configurac
 | Recurso | Contrato |
 | --- | --- |
 | Imagen | Compilación Rust con `Cargo.lock`; imágenes base fijadas por digest. La imagen final Debian incorpora el binario, certificados CA y `curl` para salud. No necesita Node.js. |
-| Proceso | UID `10001`, GID `10001`, sistema raíz de solo lectura, `cap_drop: ALL` y `no-new-privileges`. Compose limita a 128 procesos, 512 MiB y una CPU. |
+| Proceso | UID `10001`, GID `10001`, sistema raíz de solo lectura, `cap_drop: ALL` y `no-new-privileges`. Compose limita a 128 procesos, 512 MiB sin swap y una CPU. |
 | Listener | Modo hosted en `0.0.0.0:3847` dentro del contenedor. Fuera de `127.0.0.1` exige hosted con OIDC y una IPv4 privada o `0.0.0.0`. |
 | Trabajo | Un directorio local persistente en `/var/lib/mddiff`, `0700`, con `work.sqlite3` y auxiliares SQLite privados. Una instancia por base. |
 | Secretos | Archivos normales `0600`, propiedad de `10001:10001`, montados en solo lectura bajo `/run/secrets/mddiff/`. La clave no pertenece al directorio de datos. |
@@ -22,7 +22,7 @@ El builder usa Rust `1.95.0` sobre Bookworm y un solo trabajo de compilación (`
 
 [`deploy/compose.yaml`](../../deploy/compose.yaml) inicia solo mddiff en una red Docker privada, sin publicar puertos del host. El proxy puede compartir esa red y usar `mddiff:3847` como upstream. La aplicación necesita salida HTTPS hacia el IdP y los destinos autorizados; la ausencia de puertos publicados no sustituye las reglas de acceso a la red.
 
-Compose usa `restart: unless-stopped`, `init: true` y 15 segundos de margen de parada. Sus límites de CPU, memoria y procesos son una configuración inicial; la capacidad para diez usuarios debe medirse en S13. Los bind mounts tienen `create_host_path: false`: prepara los archivos y directorios antes de arrancar, en lugar de esperar que Docker cree una ruta ausente.
+Compose usa `restart: unless-stopped`, `init: true` y 15 segundos de margen de parada. Sus límites de CPU, memoria y procesos son una configuración inicial; el perfil medido de diez sesiones y sus cuotas se documentan en [S13](capacity-validation.md). Los bind mounts tienen `create_host_path: false`: prepara los archivos y directorios antes de arrancar, en lugar de esperar que Docker cree una ruta ausente.
 
 Si el proxy se ejecuta en el host, el override [`deploy/compose.loopback.yaml`](../../deploy/compose.loopback.yaml) publica únicamente `127.0.0.1:3847`. No uses una publicación en todas las interfaces ni el modo de red del host para simplificar esa conexión. Las opciones de usuario, montajes, salud y protección del servicio se describen en la [referencia de servicios Compose](https://docs.docker.com/reference/compose-file/services/).
 
@@ -224,4 +224,4 @@ También pasaron las 56 pruebas Rust y Clippy. Estas comprobaciones del código 
 
 GitHub Actions aprobó los jobs `check` y `container` en Linux amd64 para el código de empaquetado `c4c9382`: [corrida de CI](https://github.com/joalceco/mddiff/actions/runs/40741776582). Incluye las regresiones locales/alojadas, controles de navegador y construcción e integración del contenedor.
 
-No se validaron un IdP real con HTTPS, el cluster, el despliegue público o la carga de diez usuarios. El IdP y los proveedores de esta suite son sintéticos. S13 cubre límites y capacidad; S14, publicación y recuperación operativa.
+La corrida S12 no validó un IdP real con HTTPS, el cluster, el despliegue público o diez usuarios. [S13](capacity-validation.md) incorpora la medición posterior de diez sesiones con cuotas. El IdP y los proveedores de estas suites son sintéticos; S14 cubre publicación y recuperación operativa.

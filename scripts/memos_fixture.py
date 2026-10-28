@@ -5,19 +5,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import secrets
 import threading
+import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 
 class Memos:
-    def __init__(self):
-        self.memos = {user: secrets.token_urlsafe(32) for user in ("alice", "bob")}
+    def __init__(self, users=("alice", "bob")):
+        self.memos = {user: secrets.token_urlsafe(32) for user in users}
         self.secrets = set(self.memos.values())
         self.documents = {}
         self.audit = []
         self.revoked = set()
         self.mode = "normal"
         self.gate = None
+        self.delay_seconds = 0
         for user in self.memos:
             self.note(user, "shared", f"\ufeff# Nota privada de {user}\r\n\r\nUnicode: 🌳 日本語.\r\nNUL: \0 fin.\r\n", "2026-10-28T01:02:03Z")
             self.note(user, "plain", f"# Sin fecha de {user}\n")
@@ -49,8 +51,8 @@ class Memos:
 
 
 @contextmanager
-def memos():
-    state = Memos()
+def memos(users=("alice", "bob")):
+    state = Memos(users)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -67,6 +69,7 @@ def memos():
             self.wfile.write(payload)
 
         def do_GET(self):
+            time.sleep(state.delay_seconds)
             parsed = urlsplit(self.path)
             credential = self.headers.get("Authorization", "").removeprefix("Bearer ")
             user = next((name for name, value in state.memos.items() if value == credential), None)

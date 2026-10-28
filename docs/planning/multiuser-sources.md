@@ -108,7 +108,7 @@ Las escrituras del trabajo serán atómicas y usarán una revisión esperada. Un
 
 El modo local conserva el uso actual de archivos dentro de `--root`, CLI y loopback. El modo alojado acepta contenido o referencias estructuradas de proveedor. No acepta rutas del sistema de archivos del servidor ni permite activar la lectura local desde una solicitud.
 
-Los JSON locales con rutas conservan el límite de 16 KiB. La API alojada admite 24 MiB + 16 KiB de transporte para dos documentos escapados en JSON, con 2 MiB por documento. La importación manual no utiliza multipart. S13 debe verificar límites y capacidad; el tamaño de petición no demuestra por sí solo que una persona no pueda agotar recursos.
+Los JSON locales con rutas conservan el límite de 16 KiB. La API alojada admite 24 MiB + 16 KiB de transporte para dos documentos escapados en JSON, con 2 MiB por documento. La importación manual no utiliza multipart. [S13](capacity-validation.md) incorpora cuotas, límites de complejidad y de vista calculada y una prueba sintética de diez sesiones; el tamaño de petición no demuestra por sí solo que una persona no pueda agotar recursos.
 
 ### Conexiones personales y lectura
 
@@ -138,7 +138,7 @@ La retención de backups, registros transitorios y SQLite/WAL debe acordarse ant
 
 El despliegue inicial se planifica sobre un contenedor de aplicación dentro del entorno Docker/LXC disponible. Se verificarán capacidad, ubicación, red, certificados y publicación antes del despliegue. Direcciones, hostnames, rutas privadas y credenciales de operación no forman parte de este documento público.
 
-[S12](container-deployment.md) prepara una imagen sin privilegios, datos persistentes y secretos externos, Compose sin puertos publicados por defecto, proxy HTTPS de ejemplo y salud sin contenido. No inicia un IdP de desarrollo ni cambia infraestructura. La construcción y la integración Docker completa pasaron el 2026-10-28 en Linux arm64 con usuarios y proveedores sintéticos; CI remoto sigue pendiente. S13 conserva las pruebas de capacidad y S14, el despliegue, respaldo y rollback.
+[S12](container-deployment.md) prepara una imagen sin privilegios, datos persistentes y secretos externos, Compose sin puertos publicados por defecto, proxy HTTPS de ejemplo y salud sin contenido. No inicia un IdP de desarrollo ni cambia infraestructura. La construcción y la integración Docker completa pasaron el 2026-10-28 en Linux arm64 y en CI Linux amd64 con usuarios y proveedores sintéticos. [S13](capacity-validation.md) añade la medición con cuotas y diez sesiones; S14 conserva el despliegue, respaldo y rollback.
 
 No se introduce Kubernetes, Redis o replicación para esta beta. El hecho de usar un túnel HTTPS no reemplaza la autorización de la aplicación ni la protección del endpoint MCP.
 
@@ -173,7 +173,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
-Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
+Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
 
 ## Fuera de esta beta
 

@@ -141,7 +141,7 @@ impl HostedMcp {
     }
 
     #[tool(
-        description = "Sustituye únicamente la propuesta del trabajo propio por contenido Markdown. Usa expected_revision obtenido de get_current_work y candidate {label,markdown}; conserva el original. Si cambió el trabajo devuelve conflicto sin sobrescribirlo. Requiere un original ya abierto. Actualiza automáticamente el visor y devuelve viewer_url. Cada documento admite hasta 2 MiB UTF-8. No acepta rutas del host ni propietarios.",
+        description = "Sustituye únicamente la propuesta del trabajo propio por contenido Markdown. Usa expected_revision obtenido de get_current_work y candidate {label,markdown}; conserva el original. Si cambió el trabajo devuelve conflicto sin sobrescribirlo. Requiere un original ya abierto. Actualiza automáticamente el visor y devuelve viewer_url. Cada documento admite hasta 2 MiB UTF-8, sujeto a límites de complejidad y de la vista calculada. Una cuota agotada devuelve 429; no fuerces otra revisión al reintentar. No acepta rutas del host ni propietarios.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

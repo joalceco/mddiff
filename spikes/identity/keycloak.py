@@ -140,7 +140,8 @@ def main():
         "issuer": BASE + "/realms/" + REALM, "mcp_url": RESOURCE, "web_url": "http://127.0.0.1:3850",
         "admin_password": secrets.token_urlsafe(32),
         "resource_client": {"client_id": "mddiff-resource", "secret": secrets.token_urlsafe(32)},
-        "users": {name: {"username": name, "password": secrets.token_urlsafe(24)} for name in ("alice", "bob", "mallory")},
+        "users": {name: {"username": name, "password": secrets.token_urlsafe(24)}
+                  for name in ("alice", "bob", "mallory", *(f"load{n:02}" for n in range(3, 11)))},
     }
     private_write(RUNTIME, json.dumps(runtime, indent=2) + "\n")
     env_file = DIRECTORY / "keycloak.env"
@@ -150,6 +151,7 @@ def main():
     subprocess.run([
         "docker", "run", "--detach", "--name", NAME, "--label", "mddiff.identity-spike=true",
         "--publish", "127.0.0.1:8848:8080", "--memory", "768m", "--cpus", "1",
+        "--env", "JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m",
         "--env-file", str(env_file), IMAGE, "start-dev", "--hostname=" + BASE,
     ], check=True, stdout=subprocess.DEVNULL)
     deadline = time.monotonic() + 120

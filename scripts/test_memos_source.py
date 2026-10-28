@@ -208,6 +208,8 @@ def main():
                     provider.note("alice", "large", "é" * (1024 * 1024 + 1))
                     failed(alice, provider, {**valid, "reference": "large"}, {413}, events)
                     provider.note("alice", "wire", "\x01" * (2 * 1024 * 1024))
+                    failed(alice, provider, {**valid, "reference": "wire"}, {413}, events)
+                    provider.note("alice", "wire", "\x01" * (256 * 1024) + "z" * (1792 * 1024))
                     capture(alice, provider, "alice", "wire", "wire", events, other)
                     capture(alice, provider, "alice", "shared", "shared", events, other)
 

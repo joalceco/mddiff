@@ -10,6 +10,8 @@ La aplicación principal y su puerto 3847 no cambian. Este paquete Rust es indep
 - Rust/Cargo, Python 3 y Codex CLI; la corrida registrada usó Rust 1.95.0, Python 3.14 y Codex 0.163.0 en macOS arm64.
 - Puertos locales libres: 8848 para Keycloak, 3850 para el gateway y 43210 para el callback OAuth de Codex.
 
+La fixture limita el heap JVM a 128–384 MiB dentro de sus 768 MiB. Es una configuración para pruebas sintéticas; no dimensiona un IdP público. Construye la imagen de mddiff antes de arrancar la fixture para evitar competencia de memoria durante la compilación.
+
 No instalar este prototipo en un servidor público. Usa `start-dev`, HTTP de loopback, usuarios con contraseñas de prueba, almacenamiento en memoria y registro de clientes de prueba con password grant. El cliente web y el cliente Codex sí exigen Authorization Code + PKCE S256; no tienen password grant habilitado.
 
 ## Reproducir
@@ -54,7 +56,7 @@ El harness Codex usa directorios `CODEX_HOME` temporales fuera del repositorio y
 
 | Componente | Evidencia |
 | --- | --- |
-| `keycloak.py` | Keycloak 26.8.1, realm propio y otro realm para probar emisor incorrecto; Alice/Bob admitidos y Mallory sin admisión. |
+| `keycloak.py` | Keycloak 26.8.1, realm propio y otro realm para probar emisor incorrecto; Alice/Bob y `load03`–`load10` admitidos; Mallory sin admisión. Las ocho cuentas adicionales sirven para S13. |
 | Gateway Rust | Discovery OIDC, PKCE, estado ligado a cookie, nonce/firma/audiencia del ID token, hash del access token y autorización por introspección. |
 | `test_spike.py` | Acceso anónimo, admisión, scopes, emisor/audiencia, caducidad, revocación, PKCE, sesión web, aislamiento y conflictos. |
 | `codex_probe.py` | OAuth del app-server, descubrimiento, llamada real a `open_comparison`, propietarios separados y rechazo de revisiones antiguas; cero turnos de modelo. |

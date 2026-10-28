@@ -222,13 +222,19 @@ def main():
         initialize(payload["tls"])
         with ExitStack() as resources:
             resources.enter_context(issuer_forwarder())
-            provider = resources.enter_context(memos())
+            users = [name for name in runtime["users"] if name != "mallory"] if payload.get("capacity") else ("alice", "bob")
+            provider = resources.enter_context(memos(users))
             with patch("hosted_mcp_fixture.certificates", return_value=(SECRETS / "ca.pem", SECRETS / "server.pem", SECRETS / "server.key")):
                 base, _ = resources.enter_context(tls_proxy(SECRETS, BASE_PORT))
             configure(runtime, provider, base)
             resources.enter_context(audience_clients(runtime, base + "/mcp"))
             resources.enter_context(web_client(runtime, base))
-            scenario = Scenario(runtime, provider, base)
+            if payload.get("capacity"):
+                from capacity_scenario import Capacity, long_lived_clients
+                resources.enter_context(long_lived_clients(runtime))
+                scenario = Capacity(runtime, provider, base)
+            else:
+                scenario = Scenario(runtime, provider, base)
             emit("ready", uid=os.geteuid(), gid=os.getegid(), origin=base)
             while line := sys.stdin.readline(2 * 1024 * 1024):
                 command = json.loads(line)
@@ -237,6 +243,14 @@ def main():
                     break
                 if phase == "first":
                     scenario.sessions(first=True)
+                    if payload.get("capacity"):
+                        emit("passed", phase=phase, metrics=scenario.bootstrap_metrics)
+                        continue
+                elif phase == "load":
+                    emit("passed", phase=phase, metrics=scenario.load(command["profile"]))
+                    continue
+                elif phase == "limits":
+                    scenario.limits()
                 elif phase == "restart":
                     scenario.sessions(update=True)
                 elif phase == "recreated":
@@ -259,8 +273,9 @@ def main():
         return 0
     except CheckFailed as error:
         emit("error", phase=phase, message=str(error))
-    except BaseException:
-        emit("error", phase=phase, message="Private diagnostics were suppressed.")
+    except BaseException as error:
+        stage = getattr(locals().get("scenario"), "stage", phase)
+        emit("error", phase=phase, message="Check failed during " + stage + " (" + type(error).__name__ + "); private diagnostics were suppressed.")
     return 1
 
 

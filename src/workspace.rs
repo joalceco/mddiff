@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, OnceCell, RwLock, watch};
+use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, RwLock, Semaphore, watch};
 
 use crate::{
     AppError, MAX_DOCUMENT_BYTES,
@@ -74,9 +74,77 @@ pub struct Snapshot {
 pub struct Workspaces {
     users: Mutex<HashMap<VerifiedIdentity, Arc<Workspace>>>,
     storage: Option<Arc<Storage>>,
+    budget: Arc<Budget>,
+}
+
+struct Budget {
+    requests: Arc<Semaphore>,
+    bodies: Arc<Semaphore>,
+    sources: Arc<Semaphore>,
+    compute: Arc<Semaphore>,
+    jobs: Arc<Semaphore>,
+    events: Arc<Semaphore>,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            requests: Arc::new(Semaphore::new(16)),
+            bodies: Arc::new(Semaphore::new(2)),
+            sources: Arc::new(Semaphore::new(2)),
+            compute: Arc::new(Semaphore::new(2)),
+            jobs: Arc::new(Semaphore::new(10)),
+            events: Arc::new(Semaphore::new(40)),
+        }
+    }
+}
+
+fn capacity() -> AppError {
+    AppError(
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "El servicio alcanzó su cuota de operaciones. Vuelve a intentarlo en un segundo.".into(),
+    )
+}
+
+fn permit(semaphore: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, AppError> {
+    Arc::clone(semaphore)
+        .try_acquire_owned()
+        .map_err(|_| capacity())
+}
+
+pub enum RequestKind {
+    Content,
+    Source,
+    Events,
 }
 
 impl Workspaces {
+    pub async fn request_permits(
+        &self,
+        identity: &VerifiedIdentity,
+        kind: RequestKind,
+    ) -> Result<Vec<OwnedSemaphorePermit>, AppError> {
+        let workspace = self.entry(identity).await?;
+        if matches!(kind, RequestKind::Events) {
+            return Ok(vec![
+                permit(&self.budget.events)?,
+                permit(&workspace.events)?,
+            ]);
+        }
+        let mut permits = vec![permit(&self.budget.requests)?, permit(&workspace.requests)?];
+        permits.push(
+            Arc::clone(if matches!(kind, RequestKind::Source) {
+                &self.budget.sources
+            } else {
+                &self.budget.bodies
+            })
+            .acquire_owned()
+            .await
+            .map_err(|_| capacity())?,
+        );
+        Ok(permits)
+    }
+
     /// Checks the opened SQLite handle with SELECT 1; does not inspect work or test writes.
     pub async fn check_storage(&self) -> Result<(), AppError> {
         let storage = self.storage.clone().ok_or_else(|| {
@@ -109,23 +177,41 @@ impl Workspaces {
         Ok(Self {
             users: Mutex::default(),
             storage: Some(Arc::new(Storage::open(directory)?)),
+            budget: Arc::default(),
         })
     }
 
+    async fn entry(&self, identity: &VerifiedIdentity) -> Result<Arc<Workspace>, AppError> {
+        let mut users = self.users.lock().await;
+        if self.storage.is_some() && !users.contains_key(identity) && users.len() >= 10 {
+            let idle = users
+                .iter()
+                .find(|(_, workspace)| {
+                    Arc::strong_count(workspace) == 1
+                        && workspace.requests.available_permits() == 4
+                        && workspace.events.available_permits() == 3
+                })
+                .map(|(owner, _)| owner.clone());
+            if let Some(idle) = idle {
+                users.remove(&idle);
+            } else {
+                return Err(capacity());
+            }
+        }
+        Ok(Arc::clone(users.entry(identity.clone()).or_insert_with(
+            || {
+                Arc::new(Workspace::with_storage(
+                    self.storage
+                        .as_ref()
+                        .map(|store| (Arc::clone(store), identity.clone())),
+                    Some(Arc::clone(&self.budget)),
+                ))
+            },
+        )))
+    }
+
     pub async fn for_user(&self, identity: &VerifiedIdentity) -> Result<Arc<Workspace>, AppError> {
-        let workspace = Arc::clone(
-            self.users
-                .lock()
-                .await
-                .entry(identity.clone())
-                .or_insert_with(|| {
-                    Arc::new(Workspace::with_storage(
-                        self.storage
-                            .as_ref()
-                            .map(|store| (Arc::clone(store), identity.clone())),
-                    ))
-                }),
-        );
+        let workspace = self.entry(identity).await?;
         workspace.restore().await?;
         Ok(workspace)
     }
@@ -142,14 +228,21 @@ pub struct Workspace {
     revisions: watch::Sender<u64>,
     storage: Option<(Arc<Storage>, VerifiedIdentity)>,
     restored: OnceCell<()>,
+    budget: Option<Arc<Budget>>,
+    jobs: Arc<Semaphore>,
+    requests: Arc<Semaphore>,
+    events: Arc<Semaphore>,
 }
 
 impl Workspace {
     pub(crate) fn new() -> Self {
-        Self::with_storage(None)
+        Self::with_storage(None, None)
     }
 
-    fn with_storage(storage: Option<(Arc<Storage>, VerifiedIdentity)>) -> Self {
+    fn with_storage(
+        storage: Option<(Arc<Storage>, VerifiedIdentity)>,
+        budget: Option<Arc<Budget>>,
+    ) -> Self {
         let (revisions, _) = watch::channel(0);
         Self {
             current: RwLock::new(Current {
@@ -167,6 +260,10 @@ impl Workspace {
             revisions,
             storage,
             restored: OnceCell::new(),
+            budget,
+            jobs: Arc::new(Semaphore::new(2)),
+            requests: Arc::new(Semaphore::new(4)),
+            events: Arc::new(Semaphore::new(3)),
         }
     }
 
@@ -174,9 +271,19 @@ impl Workspace {
         if let Some((store, owner)) = &self.storage {
             self.restored
                 .get_or_try_init(|| async {
+                    let compute = match &self.budget {
+                        Some(budget) => Some(
+                            Arc::clone(&budget.compute)
+                                .acquire_owned()
+                                .await
+                                .map_err(|_| capacity())?,
+                        ),
+                        None => None,
+                    };
                     let store = Arc::clone(store);
                     let owner = owner.clone();
                     let current = tokio::task::spawn_blocking(move || {
+                        let _compute = compute;
                         let started = Instant::now();
                         prepare(store.read(&owner)?, true, started)
                     })
@@ -322,9 +429,14 @@ impl Workspace {
         connection_generation: Option<u64>,
         read: impl FnOnce() -> Result<Work, AppError> + Send + 'static,
     ) -> Result<Arc<Snapshot>, AppError> {
+        let quota = match &self.budget {
+            Some(budget) => Some((permit(&budget.jobs)?, permit(&self.jobs)?)),
+            None => None,
+        };
         let workspace = Arc::clone(self);
         // Finish commit and publication even if the requesting browser disconnects.
         tokio::spawn(async move {
+            let _quota = quota;
             let _update = workspace.updates.lock().await;
             let revision = workspace.current.read().await.work.revision;
             if expected.is_some_and(|n| n != revision) {
@@ -335,7 +447,18 @@ impl Workspace {
                 .filter(|n| *n <= i64::MAX as u64)
                 .ok_or_else(|| AppError::bad_request("La revisión alcanzó el límite admitido."))?;
             let storage = workspace.storage.clone();
+            // Detached commits retain compute capacity after an HTTP client disconnects.
+            let compute = match &workspace.budget {
+                Some(budget) => Some(
+                    Arc::clone(&budget.compute)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| capacity())?,
+                ),
+                None => None,
+            };
             let current = tokio::task::spawn_blocking(move || {
+                let _compute = compute;
                 let started = Instant::now();
                 let mut work = read()?;
                 work.revision = next;
@@ -370,6 +493,13 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
                 "Cada documento admite hasta 2 MiB.".into(),
             ));
         }
+        if validate_labels && !diff::within_hosted_complexity(&document.markdown) {
+            return Err(AppError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "Este Markdown es demasiado complejo para la vista alojada. Reduce las líneas o simplifica su formato."
+                    .into(),
+            ));
+        }
         if validate_labels
             && (document.label.trim().is_empty()
                 || document.label.len() > 255
@@ -396,6 +526,28 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
         processing_ms: started.elapsed().as_secs_f64() * 1000.0,
         base_source: work.base_source.clone(),
     });
+    if validate_labels {
+        struct Size(usize);
+        impl std::io::Write for Size {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 += bytes.len();
+                if self.0 > 24 * 1024 * 1024 {
+                    return Err(std::io::Error::other("render budget"));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(&mut Size(0), &snapshot).map_err(|_| {
+            AppError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "La vista calculada supera 24 MiB. Reduce el tamaño o la complejidad del Markdown."
+                    .into(),
+            )
+        })?;
+    }
     Ok(Current {
         snapshot,
         work: Arc::new(work),
@@ -430,6 +582,202 @@ mod tests {
             url: "https://notes.example/memos/synthetic-1".into(),
             captured_at: 123456,
             updated_at: Some("2026-10-28T12:00:00Z".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_quotas_isolate_owners_and_release_closed_streams() {
+        let store = Workspaces::default();
+        let alice = identity("https://identity.example", "alice");
+        let bob = identity("https://identity.example", "bob");
+        let first = store
+            .request_permits(&alice, RequestKind::Content)
+            .await
+            .unwrap();
+        let second = store
+            .request_permits(&alice, RequestKind::Content)
+            .await
+            .unwrap();
+        let workspace = store.entry(&alice).await.unwrap();
+        let waiting = Arc::clone(&workspace.requests)
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .request_permits(&alice, RequestKind::Content)
+                .await
+                .unwrap_err()
+                .0,
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        drop(first);
+        let other = store
+            .request_permits(&bob, RequestKind::Content)
+            .await
+            .unwrap();
+        drop((second, other, waiting));
+        let mut streams = Vec::new();
+        for _ in 0..3 {
+            streams.push(
+                store
+                    .request_permits(&alice, RequestKind::Events)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            store
+                .request_permits(&alice, RequestKind::Events)
+                .await
+                .unwrap_err()
+                .0,
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        let other_stream = store
+            .request_permits(&bob, RequestKind::Events)
+            .await
+            .unwrap();
+        streams.pop();
+        let reopened = store
+            .request_permits(&alice, RequestKind::Events)
+            .await
+            .unwrap();
+        drop((streams, reopened, other_stream));
+        assert_eq!(store.budget.events.available_permits(), 40);
+        let all = Arc::clone(&store.budget.requests)
+            .acquire_many_owned(16)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .request_permits(&bob, RequestKind::Content)
+                .await
+                .unwrap_err()
+                .0,
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        drop(all);
+        assert!(
+            store
+                .request_permits(&bob, RequestKind::Content)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn resident_quota_evicts_only_idle_workspaces_and_restores_their_work() {
+        let directory = Database::new();
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let owners: Vec<_> = (0..11)
+            .map(|n| identity("https://identity.example", &format!("owner-{n}")))
+            .collect();
+        let mut streams = Vec::new();
+        for owner in &owners[..10] {
+            let workspace = store.for_user(owner).await.unwrap();
+            workspace
+                .replace_if_revision(0, document(&owner.subject), None)
+                .await
+                .unwrap();
+            streams.push(
+                store
+                    .request_permits(owner, RequestKind::Events)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            store.for_user(&owners[10]).await.err().unwrap().0,
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        streams.remove(0);
+        let eleventh = store
+            .request_permits(&owners[10], RequestKind::Content)
+            .await
+            .unwrap();
+        assert_eq!(store.users.lock().await.len(), 10);
+        assert!(!store.users.lock().await.contains_key(&owners[0]));
+        drop(eleventh);
+        let restored = store.for_user(&owners[0]).await.unwrap();
+        assert_eq!(restored.work().await.revision, 1);
+        assert_eq!(
+            restored.work().await.base.as_ref().unwrap().markdown,
+            owners[0].subject
+        );
+        assert_eq!(store.users.lock().await.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn disconnected_updates_retain_compute_and_queued_job_quotas() {
+        let store = Workspaces::default();
+        let owner = identity("https://identity.example", "alice");
+        let workspace = store.for_user(&owner).await.unwrap();
+        let occupied = Arc::clone(&store.budget.compute)
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        let caller = Arc::clone(&workspace);
+        let request = tokio::spawn(async move {
+            caller
+                .replace_if_revision(0, document("# retained"), None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while workspace.jobs.available_permits() == 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert_eq!(workspace.jobs.available_permits(), 1);
+        assert_eq!(store.budget.jobs.available_permits(), 9);
+        drop(occupied);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while workspace.snapshot().await.revision == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            workspace.work().await.base.as_ref().unwrap().markdown,
+            "# retained"
+        );
+        assert_eq!(store.budget.compute.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn hosted_complexity_rejection_keeps_the_last_revision() {
+        let store = Workspaces::default();
+        let workspace = store
+            .for_user(&identity("https://identity.example", "alice"))
+            .await
+            .unwrap();
+        workspace
+            .replace_if_revision(0, document("# retained"), None)
+            .await
+            .unwrap();
+        for markdown in [
+            "x\n".repeat(10_001),
+            "x\r".repeat(10_001),
+            "*a* ".repeat(12_000),
+            format!("{}nested", "> ".repeat(129)),
+            "<div>".repeat(257),
+            "\x01".repeat(2 * 1024 * 1024),
+        ] {
+            let error = workspace
+                .replace_if_revision(1, document(&markdown), None)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.0, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(workspace.work().await.revision, 1);
+            assert_eq!(
+                workspace.work().await.base.as_ref().unwrap().markdown,
+                "# retained"
+            );
         }
     }
 
