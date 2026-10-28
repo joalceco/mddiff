@@ -6,7 +6,7 @@
 
 mddiff es una herramienta local para revisar documentos y propuestas de una IA. Conserva encabezados, listas, tablas y código; alinea los bloques y resalta las palabras que cambiaron. Un único proceso Rust sirve el visor, una API HTTP y un servidor MCP. Un agente puede abrir una comparación y actualizar el navegador que ya tienes abierto.
 
-El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado en desarrollo autentica sesiones web mediante Keycloak; todavía no es una beta pública.
+El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado dispone de una beta por invitación con Keycloak, espacios privados y MCP remoto. Google/GitHub sigue pendiente.
 
 **Ir a:** [Inicio rápido](#inicio-rápido) · [Contenedor](#ejecutar-hosted-en-un-contenedor) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
@@ -120,7 +120,7 @@ Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no conced
 
 Sin configuración OIDC, hosted solo puede arrancar cerrado en `127.0.0.1`: estado, trabajo y eventos rechazan el acceso con `401`, y salud devuelve `503`. Otra dirección exige OIDC configurado y debe ser una IPv4 privada o `0.0.0.0`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y las notas de Memos ya pueden abrirse como original; la lectura de Jira sigue pendiente.
 
-Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub y la publicación de la beta siguen pendientes. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
+Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub sigue pendiente; la beta alojada utiliza cuentas por invitación. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
 
 ### Ejecutar hosted en un contenedor
 
@@ -128,7 +128,7 @@ El repositorio incluye un Dockerfile con bases fijadas por digest y Compose para
 
 `deploy/compose.yaml` no publica puertos del host. Para un proxy en el host, `deploy/compose.loopback.yaml` publica solo `127.0.0.1:3847`; el proxy termina HTTPS y conserva el origen canónico. `GET` y `HEAD /healthz` permiten comprobar preparación sin documentos ni credenciales. Salud no comprueba continuamente la disponibilidad del IdP.
 
-Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. Esta entrega no configura DNS, router, certificados o cluster ni demuestra una instalación pública real.
+Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. La [operación de la beta por invitación](docs/planning/beta-operations.md) documenta el despliegue verificado, respaldo cifrado, restauración, observabilidad y rollback. La configuración real de infraestructura permanece fuera del repositorio.
 
 ## Usar el visor
 
@@ -335,7 +335,7 @@ En hosted, SQLite conserva únicamente el trabajo actual por persona: original, 
 
 El cliente remoto obtiene su propio token OAuth para mddiff. El backend lo verifica mediante introspección en cada solicitud, con emisor, sujeto, audiencia, scope y admisión; no almacenes ese Bearer en ejemplos, logs públicos o el repositorio. Las herramientas comparten únicamente el espacio de la identidad verificada y tratan el Markdown como datos del documento.
 
-El archivo OIDC y el directorio de datos deben permanecer fuera del checkout, con permisos privados. La base guarda el Markdown en claro; los permisos no equivalen a cifrado. Borrar elimina el contenido recuperable por la aplicación, pero WAL, copias, snapshots y el SSD pueden conservar bytes anteriores. No se crean backups automáticos ni se ha fijado una retención: esa política debe cerrarse antes del despliegue público. Consulta [los límites del borrado y las copias](docs/planning/current-work.md#borrado-funcional-copias-y-retención).
+El archivo OIDC y el directorio de datos deben permanecer fuera del checkout, con permisos privados. La base guarda el Markdown en claro; los permisos no equivalen a cifrado. Borrar elimina el contenido recuperable por la aplicación, pero WAL, copias, snapshots y el SSD pueden conservar bytes anteriores. El binario no programa backups. La instalación beta conserva hasta siete copias diarias cifradas mediante un timer externo; esas copias pueden recuperar documentos borrados o reemplazados durante la retención. Consulta [la política y recuperación de la beta](docs/planning/beta-operations.md) y [los límites del borrado y las copias](docs/planning/current-work.md#borrado-funcional-copias-y-retención).
 
 La interfaz se sirve desde el propio binario, usa fuentes del sistema y bloquea la carga de imágenes. Abrir un enlace externo del documento lleva al destino elegido en una pestaña nueva. La política de datos del agente o cliente MCP que utilices es independiente de mddiff.
 
@@ -353,7 +353,7 @@ El servidor local escucha en loopback, comprueba `Host` y `Origin`, rechaza soli
 
 **El modo local es una herramienta de un solo usuario.** No incluye autenticación ni aislamiento entre usuarios del mismo equipo. Un proceso local con acceso al puerto puede leer el estado o solicitar otros Markdown dentro de la raíz autorizada. No lo expongas mediante un proxy público o un túnel remoto.
 
-El modo hosted incorpora autenticación, separación de propietarios y un bind explícito para redes de contenedor detrás de HTTPS; TLS lo termina el proxy. Su sesión exige admisión en Keycloak; las mutaciones por cookie requieren Origin exacto y un token CSRF asociado a la sesión. La excepción HTTP de pruebas solo se admite con `allow_insecure_loopback: true` y ambos orígenes en loopback. El [paquete de contenedor](docs/planning/container-deployment.md) prepara esa ejecución; la publicación y operación del cluster siguen pendientes.
+El modo hosted incorpora autenticación, separación de propietarios y un bind explícito para redes de contenedor detrás de HTTPS; TLS lo termina el proxy. Su sesión exige admisión en Keycloak; las mutaciones por cookie requieren Origin exacto y un token CSRF asociado a la sesión. La excepción HTTP de pruebas solo se admite con `allow_insecure_loopback: true` y ambos orígenes en loopback. El [paquete de contenedor](docs/planning/container-deployment.md) prepara esa ejecución; la [guía de operación de la beta](docs/planning/beta-operations.md) registra la publicación por invitación y sus límites.
 
 ### Qué se publica en este repositorio
 

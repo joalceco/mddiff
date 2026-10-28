@@ -2,7 +2,7 @@
 
 Issue: [#13](https://github.com/joalceco/mddiff/issues/13). Rama: `feature/multiuser-sources`.
 
-Esta entrega prepara una instancia de mddiff para ejecutarse detrás de un proxy HTTPS. Incluye imagen, Compose, ejemplos de configuración, endpoint de salud y comprobaciones sintéticas. No publica el servicio ni configura DNS, certificados, router o cluster. El despliegue por invitación pertenece a [S14](https://github.com/joalceco/mddiff/issues/15); Google/GitHub sigue pendiente. [S13](capacity-validation.md) añade cuotas y la medición sintética de diez sesiones.
+Esta entrega prepara una instancia de mddiff para ejecutarse detrás de un proxy HTTPS. Incluye imagen, Compose, ejemplos de configuración, endpoint de salud y comprobaciones sintéticas. No publica el servicio ni configura DNS, certificados, router o cluster. El despliegue posterior por invitación se documenta en [S14](beta-operations.md); Google/GitHub sigue pendiente. [S13](capacity-validation.md) añade cuotas y la medición sintética de diez sesiones.
 
 Todos los dominios y rutas de este documento son ejemplos. Mantén la configuración de la instalación, sus credenciales y datos fuera del repositorio y del contexto de compilación.
 
@@ -175,7 +175,7 @@ Fuera de Compose, hosted sin OIDC puede arrancar cerrado en loopback para compat
 
 El volumen contiene Markdown en claro, procedencia y credenciales de conexiones cifradas. Los permisos Unix y el cifrado de credenciales no protegen contra un administrador con acceso al proceso, a la clave o al host. No adjuntes SQLite, WAL, SHM, archivos privados o logs con contenido a issues.
 
-Antes de actualizar, conserva la referencia de imagen actual y revisa las migraciones de esquema. Un binario antiguo puede rechazar una base migrada; cambiar únicamente la etiqueta de imagen no garantiza un rollback. El procedimiento de copia coherente, retención, recuperación de clave e IdP y restauración debe cerrarse en S14 antes de publicar. Esta entrega no crea backups automáticos ni fija una retención nueva.
+Antes de actualizar, conserva la referencia de imagen actual y revisa las migraciones de esquema. Un binario antiguo puede rechazar una base migrada; cambiar únicamente la etiqueta de imagen no garantiza un rollback. [S14](beta-operations.md) documenta la copia coherente, siete copias diarias cifradas, recuperación del IdP y de la clave, restauración y rollback verificados. Compose no crea por sí mismo esos backups: la instalación utiliza un timer externo.
 
 | Problema | Acción |
 | --- | --- |

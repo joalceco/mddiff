@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27. Rama: `feature/multiuser-sources`.
 
-Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; la publicación permanece en S14.
+Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
 
 ## Resultado esperado
 
@@ -138,7 +138,7 @@ La retención de backups, registros transitorios y SQLite/WAL debe acordarse ant
 
 El despliegue inicial se planifica sobre un contenedor de aplicación dentro del entorno Docker/LXC disponible. Se verificarán capacidad, ubicación, red, certificados y publicación antes del despliegue. Direcciones, hostnames, rutas privadas y credenciales de operación no forman parte de este documento público.
 
-[S12](container-deployment.md) prepara una imagen sin privilegios, datos persistentes y secretos externos, Compose sin puertos publicados por defecto, proxy HTTPS de ejemplo y salud sin contenido. No inicia un IdP de desarrollo ni cambia infraestructura. La construcción y la integración Docker completa pasaron el 2026-10-28 en Linux arm64 y en CI Linux amd64 con usuarios y proveedores sintéticos. [S13](capacity-validation.md) añade la medición con cuotas y diez sesiones; S14 conserva el despliegue, respaldo y rollback.
+[S12](container-deployment.md) prepara una imagen sin privilegios, datos persistentes y secretos externos, Compose sin puertos publicados por defecto, proxy HTTPS de ejemplo y salud sin contenido. No inicia un IdP de desarrollo ni cambia infraestructura. La construcción y la integración Docker completa pasaron el 2026-10-28 en Linux arm64 y en CI Linux amd64 con usuarios y proveedores sintéticos. [S13](capacity-validation.md) añade la medición con cuotas y diez sesiones; [S14](beta-operations.md) registra el despliegue por invitación, respaldo cifrado, restauración y rollback.
 
 No se introduce Kubernetes, Redis o replicación para esta beta. El hecho de usar un túnel HTTPS no reemplaza la autorización de la aplicación ni la protección del endpoint MCP.
 
@@ -173,7 +173,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
-Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
+Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. [S14](beta-operations.md) incorpora el despliegue real por invitación, restauración de trabajo/IdP/claves, reinicio y rollback; también se verificó Codex por HTTPS público con dos usuarios sintéticos. Google/GitHub y la lectura de Jira conservan sus historias pendientes.
 
 ## Fuera de esta beta
 

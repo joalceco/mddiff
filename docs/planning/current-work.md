@@ -152,7 +152,7 @@ La aplicación conserva un único trabajo recuperable y permite borrar su conten
 
 [`secure_delete=ON`](https://sqlite.org/pragma.html#pragma_secure_delete) mitiga contenido residual en páginas de las tablas ordinarias de la base. Aun así, WAL, backups ajenos a la aplicación, snapshots del volumen y características del SSD pueden conservar información previa. Eliminar una fila o un archivo no demuestra que esas copias desaparezcan.
 
-No se crean backups automáticos ni se establece una retención por omisión. Antes de publicar el servicio, S01 y la historia de despliegue deben cerrar la política de copias del trabajo vigente: incluirlo puede conservar versiones antiguas; excluirlo implica perderlo si se pierde el volumen. Las cuentas, el IdP, las conexiones y sus claves tienen necesidades de recuperación independientes.
+El binario no crea backups automáticos ni fija una retención por omisión. La instalación [S14: beta por invitación](beta-operations.md) configura hasta siete copias diarias cifradas, con respaldo coherente del trabajo, IdP, configuraciones y claves. Una copia puede recuperar versiones reemplazadas o borradas después de su captura. La política de esa instalación no convierte el trabajo actual en una biblioteca ni cambia el comportamiento del modo local.
 
 Los ejemplos de este documento son sintéticos. No se deben utilizar documentos reales como fixtures públicas.
 
