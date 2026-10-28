@@ -20,6 +20,8 @@ def rpc(env, access, method, params=None, extra=None):
     status, raw, headers = http(env, "/mcp", {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
                                 access, headers={**HEADERS, **(extra or {})})
     check(status == 200, "Authenticated MCP returned a non-protocol HTTP error.")
+    check(headers.get("Content-Length") is not None or headers.get("Transfer-Encoding", "").lower() == "chunked",
+          "The HTTP/1.1 MCP response omitted explicit framing across the verified TLS proxy.")
     check(headers.get("Mcp-Session-Id") is None, "Hosted MCP created a transport session.")
     return json.loads(raw)
 

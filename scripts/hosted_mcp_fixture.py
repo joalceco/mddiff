@@ -45,11 +45,13 @@ class TlsBrowser(Browser):
         return cookies[0].value
 
 
-def http(env, path, body=None, access=None, method=None, headers=None, opener=None):
+def http(env, path, body=None, access=None, method=None, headers=None, opener=None, raw=None):
+    check(body is None or raw is None, "Choose a JSON object or an encoded test body, not both.")
     outgoing = {**({"Authorization": "Bearer " + access} if access else {}), **(headers or {})}
-    if body is not None:
+    if body is not None or raw is not None:
         outgoing["Content-Type"] = "application/json"
-    request = Request(env.base + path, data=None if body is None else json.dumps(body, ensure_ascii=False).encode(), headers=outgoing, method=method)
+    payload = raw if raw is not None else (None if body is None else json.dumps(body, ensure_ascii=False).encode())
+    request = Request(env.base + path, data=payload, headers=outgoing, method=method)
     client = opener or build_opener(ProxyHandler({}), HTTPSHandler(context=env.trust), Redirects())
     try:
         response = client.open(request, timeout=15)
@@ -131,17 +133,25 @@ def tls_proxy(directory, backend_port):
                     connection.send(chunk)
                     remaining -= len(chunk)
                 upstream = connection.getresponse()
+                chunked = upstream.getheader("Transfer-Encoding", "").lower() == "chunked"
                 self.send_response(upstream.status)
                 for name, value in upstream.getheaders():
                     if name.lower() not in hop:
                         self.send_header(name, value)
+                if chunked:
+                    self.send_header("Transfer-Encoding", "chunked")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 started = True
                 if self.command != "HEAD":
                     while chunk := upstream.read1(65536):
-                        self.wfile.write(chunk)
+                        if chunked:
+                            self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
+                        else:
+                            self.wfile.write(chunk)
                         self.wfile.flush()
+                    if chunked:
+                        self.wfile.write(b"0\r\n\r\n"); self.wfile.flush()
             except (OSError, HTTPException):
                 if not started:
                     self.send_error(502)

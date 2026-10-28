@@ -119,7 +119,8 @@ class Capacity(Scenario):
                                       method="PUT", headers=headers, opener=browser.opener)
                 metrics["api_put"].append((time.perf_counter() - start) * 1000)
                 check(status == 200, "A ten-user write failed inside its declared quotas.")
-                snapshot = json.loads(raw); metrics["rust_processing"].append(snapshot["processing_ms"])
+                metrics["rust_processing"].append(json.loads(raw)["processing_ms"])
+                del raw
                 self.streams[index].revision(before + 1)
                 start = time.perf_counter()
                 result = tool(self.env, access, "submit_proposal", {"expected_revision": before + 1, "candidate": proposed})
@@ -139,6 +140,7 @@ class Capacity(Scenario):
                 check(status == 200 and json.loads(raw)["revision"] == before + 2
                       and all(("CAPACITY-OWNER-" + other).encode() not in raw for other in self.users if other != name),
                       "The viewer refresh leaked another owner or returned an incorrect revision.")
+                del raw
             return metrics
 
         start = time.perf_counter()
@@ -201,12 +203,16 @@ class Capacity(Scenario):
             rejected(body, 413)
         barrier = threading.Barrier(10, timeout=15)
         self.stage = "concurrent JSON expansion"
+        revisions = {value["revision"] for value in self.expected.values()}
+        check(len(revisions) == 1, "The common expansion probe needs synchronized revisions.")
+        # Share encoded bytes across clients; the driver is outside the application's memory budget.
+        encoded = json.dumps({"expected_revision": next(iter(revisions)),
+                              "base": {"label": "expanded.md", "markdown": "\x01" * (2 * 1024 * 1024)}}).encode()
         def excessive_view(owner):
             browser = self.browsers[owner]
             expected = self.expected[owner]
             barrier.wait()
-            status, raw, _ = http(self.env, "/api/work", {"expected_revision": expected["revision"],
-                "base": {"label": "expanded.md", "markdown": "\x01" * (2 * 1024 * 1024)}}, method="PUT",
+            status, raw, _ = http(self.env, "/api/work", raw=encoded, method="PUT",
                 headers={"Origin": self.base, "X-CSRF-Token": self.csrf[owner]}, opener=browser.opener)
             check(status == 413, "Concurrent JSON expansion did not fail within the rendering budget.")
             self.safe(raw)

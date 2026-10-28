@@ -66,19 +66,21 @@ La corrida local completa terminó con código `0`. Las diez sesiones completaro
 
 | Operación | 4 KiB p50 / p95 (ms) | 2 MiB p50 / p95 (ms) |
 | --- | --- | --- |
-| PUT del original | 19.92 / 33.85 | 241.39 / 400.10 |
-| Propuesta MCP | 19.36 / 33.96 | 282.06 / 340.75 |
-| GET del trabajo | 18.12 / 44.15 | 209.45 / 269.54 |
-| GET de la vista | 16.65 / 34.38 | 198.41 / 239.17 |
-| Núcleo de cálculo Rust | 0.06 / 0.12 | 12.78 / 23.72 |
+| PUT del original | 26.54 / 35.23 | 296.49 / 438.14 |
+| Propuesta MCP | 24.04 / 30.28 | 236.22 / 314.03 |
+| GET del trabajo | 15.91 / 23.40 | 216.85 / 275.16 |
+| GET de la vista | 15.47 / 25.14 | 199.33 / 271.42 |
+| Núcleo de cálculo Rust | 0.08 / 0.18 | 13.01 / 20.64 |
 
-El pico completo fue **296.30 MiB**, por debajo del umbral de 460 MiB y del límite de 512 MiB. La captura inicial Memos tuvo p50 **121.80 ms** y p95 **134.85 ms**, con diez muestras y dos GET sintéticos de 50 ms por captura.
+El pico completo fue **282.91 MiB**, por debajo del umbral de 460 MiB y del límite de 512 MiB. La captura inicial Memos tuvo p50 **114.51 ms** y p95 **120.70 ms**, con diez muestras y dos GET sintéticos de 50 ms por captura.
 
 Los percentiles usan rango más próximo: 30 muestras por operación pequeña y diez por operación grande. El núcleo Rust aporta 60 y 20 muestras, respectivamente, porque mide tanto la sustitución como la propuesta. Con diez muestras, p95 coincide con el máximo; no se atribuye precisión estadística de una prueba prolongada.
 
 Las latencias HTTP/MCP incluyen espera, introspección, TLS loopback, serialización y cliente de prueba. `processing_ms` mide preparación Markdown/diff/render antes de contabilizar el tamaño JSON, persistir y enviar; excluye cola, SQL y red. La captura de fuente se informa por separado; no representa la latencia de Memos o Jira reales. No se midieron percentiles de pintado del navegador.
 
 Pasaron 60 pruebas Rust, formato, Clippy y release. Las regresiones y el estado de las corridas de contenedor, navegador, modos, autenticación, persistencia y proveedores se registran en el issue y en CI. La corrida de navegador utilizó Chrome local; CI mantiene Chromium.
+
+Codex CLI 0.163 también pasó la integración real de OAuth PKCE, recurso HTTPS con CA temporal verificada, dos cuentas, propuestas/SSE/visor y rechazo de revisiones antiguas; cero turnos de modelo. La automatización utiliza [Codex App Server](https://learn.chatgpt.com/docs/app-server).
 
 ## Cobertura y hallazgos
 
@@ -93,7 +95,9 @@ Pasaron 60 pruebas Rust, formato, Clippy y release. Las regresiones y el estado 
 
 La revisión inicial detectó cálculo y colas de actualizaciones sin una cota global, ausencia de un límite de complejidad/vista y una caché de propietarios que crecía sin expulsar vistas inactivas. Esta entrega incorpora los presupuestos anteriores. La lectura de fuentes utiliza un presupuesto separado; la prueba mantiene una fuente pausada y comprueba que otra cuenta puede leer su trabajo.
 
-Durante la preparación, la fixture Keycloak terminó con `OOMKilled=true`. Se acotó su heap mediante `JAVA_OPTS_KC_HEAP`, se separó la construcción de la imagen de su arranque y el proxy de pruebas pasó a reenviar cuerpos por bloques de 64 KiB, sin acumular las diez peticiones grandes en memoria. La corrida final comprobó que el IdP siguió activo sin OOM. Esa configuración sirve para la fixture; no dimensiona un IdP de producción. La [guía oficial de contenedores Keycloak](https://www.keycloak.org/server/containers) explica el ajuste del heap y el dimensionamiento del servicio real.
+Durante la preparación, la fixture Keycloak terminó con `OOMKilled=true`. Se acotó su heap mediante `JAVA_OPTS_KC_HEAP`, se separó la construcción de la imagen de su arranque y el proxy de pruebas pasó a reenviar cuerpos por bloques de 64 KiB, sin acumular las diez peticiones grandes en memoria. El driver libera las vistas intermedias y comparte la codificación del cuerpo excesivo entre sus clientes, manteniendo diez peticiones independientes; esos buffers no forman parte del presupuesto de mddiff. La corrida final comprobó que el IdP siguió activo sin OOM. Esa configuración sirve para la fixture; no dimensiona un IdP de producción. La [guía oficial de contenedores Keycloak](https://www.keycloak.org/server/containers) explica el ajuste del heap y el dimensionamiento del servicio real.
+
+La integración con Codex detectó que el proxy de pruebas debía conservar el encuadre de respuestas HTTP por chunks. Se añadió la terminación de chunks y una aserción de framing en la regresión MCP; Codex y la carga completa pasaron con esa corrección.
 
 ## Reproducir
 
