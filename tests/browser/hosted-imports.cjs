@@ -90,37 +90,40 @@ async function rejectedFile(page, context, name, bytes, puts) {
   check(puts.length === count, "Invalid file reached the write API.");
 }
 
-async function conflict(page, context, remotePage, puts) {
+async function conflict(page, context, remotePage, puts, side = "base") {
   await closed(page);
   const before = await api(context);
-  await page.locator("#base-paste").click();
+  const opposite = side === "base" ? "candidate" : "base";
+  const method = side === "base" ? "PUT" : "PATCH";
+  await page.locator(`#${side}-paste`).click();
   const remoteText = "# Actualización externa sintética\n\nOtra revisión conserva sus cambios.\n";
-  if (remotePage) await paste(remotePage, context, "candidate", remoteText);
-  else await api(context, "PUT", { expected_revision: before.revision, base: before.base, candidate: { label: "Externa.md", markdown: remoteText } });
+  if (remotePage) await paste(remotePage, context, opposite, remoteText);
+  else if (opposite === "candidate") await api(context, "PATCH", { expected_revision: before.revision, candidate: { label: "Externa.md", markdown: remoteText } });
+  else await api(context, "PUT", { expected_revision: before.revision, base: { label: "Externa.md", markdown: remoteText }, candidate: before.candidate });
   const current = await api(context);
   const draft = "# Borrador local sintético\n\nEste texto no debe sobrescribir otra revisión.\n";
-  const rejected = page.waitForResponse((response) => response.url() === BASE + "/api/work" && response.request().method() === "PUT" && response.status() === 409);
-  await page.locator("#base-text").fill(draft);
+  const rejected = page.waitForResponse((response) => response.url() === BASE + "/api/work" && response.request().method() === method && response.status() === 409);
+  await page.locator(`#${side}-text`).fill(draft);
   const response = await rejected;
   check(response.request().postDataJSON().expected_revision === before.revision, "Incoming SSE silently rebased an open draft.");
-  await until(() => page.locator("#base-import-status").evaluate((el) => el.classList.contains("invalid")), "Conflict did not keep an inline error.");
-  check(await page.locator("#base-text").inputValue() === draft, "Conflict destroyed the visible draft.");
+  await until(() => page.locator(`#${side}-import-status`).evaluate((el) => el.classList.contains("invalid")), "Conflict did not keep an inline error.");
+  check(await page.locator(`#${side}-text`).inputValue() === draft, "Conflict destroyed the visible draft.");
   check(same(current, await api(context)), "Conflicting draft overwrote the current server pair.");
   const choosing = page.waitForEvent("filechooser");
-  await page.locator("#base-upload").click();
+  await page.locator(`#${side}-upload`).click();
   await (await choosing).setFiles([]);
-  check(await page.locator("#base-text").isVisible() && await page.locator("#base-text").inputValue() === draft, "Cancelling the file picker destroyed a conflicted draft.");
+  check(await page.locator(`#${side}-text`).isVisible() && await page.locator(`#${side}-text`).inputValue() === draft, "Cancelling the file picker destroyed a conflicted draft.");
   const count = puts.length;
-  await page.locator("#base-text").fill(draft + "Aún visible.\n");
+  await page.locator(`#${side}-text`).fill(draft + "Aún visible.\n");
   await sleep(600); // Longer than debounce: a conflict must require closing and reopening.
   check(puts.length === count, "Conflicted editor retried without closing and reopening.");
   await closed(page);
   if (remotePage) await closed(remotePage);
-  await paste(page, context, "base", draft);
-  check((await api(context)).candidate.markdown === remoteText, "Retry lost the other side's current contents.");
+  await paste(page, context, side, draft);
+  check((await api(context))[opposite].markdown === remoteText, "Retry lost the other side's current contents.");
 }
 
-async function queuedText(page, context) {
+async function queuedText(page, context, side) {
   await closed(page);
   const before = await api(context);
   const requests = [];
@@ -128,8 +131,9 @@ async function queuedText(page, context) {
   let started;
   const waiting = new Promise((resolve) => { started = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
+  const method = side === "base" ? "PUT" : "PATCH";
   const handler = async (route) => {
-    if (route.request().method() === "PUT") {
+    if (route.request().method() === method) {
       requests.push(route.request().postDataJSON());
       if (requests.length === 1) { started(); await gate; }
     }
@@ -137,15 +141,16 @@ async function queuedText(page, context) {
   };
   await page.route("**/api/work", handler);
   try {
-    await page.locator("#base-paste").click();
-    await page.locator("#base-text").fill("# Guardado A retenido\n");
-    await Promise.race([waiting, sleep(10000).then(() => check(false, "First pending PUT never reached the route gate."))]);
-    check(await page.locator("#base-text").isEditable(), "A pending save disabled further text entry.");
-    await page.locator("#base-text").fill("# Guardado B más reciente\n");
+    await page.locator(`#${side}-paste`).click();
+    await page.locator(`#${side}-text`).fill("# Guardado A retenido\n");
+    await Promise.race([waiting, sleep(10000).then(() => check(false, `First pending ${method} never reached the route gate.`))]);
+    check(await page.locator(`#${side}-text`).isEditable(), "A pending save disabled further text entry.");
+    await page.locator(`#${side}-text`).fill("# Guardado B más reciente\n");
     release();
-    await until(async () => (await api(context)).base.markdown === "# Guardado B más reciente\n", "Queued edits did not preserve the newest text.");
+    await until(async () => (await api(context))[side].markdown === "# Guardado B más reciente\n", "Queued edits did not preserve the newest text.");
     check(requests.length === 2 && requests[0].expected_revision === before.revision && requests[1].expected_revision === before.revision + 1, "Own queued saves did not advance revisions serially.");
-    check(same((await api(context)).candidate, before.candidate), "Queued text edits changed the opposite document.");
+    const opposite = side === "base" ? "candidate" : "base";
+    check(same((await api(context))[opposite], before[opposite]), "Queued text edits changed the opposite document.");
   } finally { release(); await page.unroute("**/api/work", handler); }
   await closed(page);
 }
@@ -197,7 +202,7 @@ async function main() {
     contexts.push(context);
     context.on("request", (request) => {
       const url = new URL(request.url());
-      if (url.origin === BASE && url.pathname === "/api/work" && request.method() === "PUT") puts.push(true);
+      if (url.origin === BASE && url.pathname === "/api/work" && ["PUT", "PATCH"].includes(request.method())) puts.push(true);
       if (url.origin === BASE && ["/api/open", "/api/compare"].includes(url.pathname)) localPaths.push(true);
     });
     await context.route("https://mddiff-synthetic.invalid/**", async (route) => { imageNetwork = true; await route.abort(); });
@@ -254,7 +259,8 @@ async function main() {
     }, clipboard);
     await until(async () => (await api(context)).base.markdown === clipboard, "A full clipboard paste normalized CRLF.");
     await closed(page);
-    await queuedText(page, context);
+    await queuedText(page, context, "base");
+    await queuedText(page, context, "candidate");
     console.log("Hosted imports: upload/paste smoke, exact BOM/CRLF/Unicode, close flush and queued edits passed.");
 
     phase = "file validation and empty documents";
@@ -306,6 +312,7 @@ async function main() {
 
     phase = "conflicts from API and another tab";
     await conflict(page, context, null, puts);
+    await conflict(page, context, null, puts, "candidate");
     const tab = await context.newPage(); await tab.goto(BASE + "/"); await ready(tab);
     await conflict(page, context, tab, puts);
     await tab.close();
@@ -315,21 +322,23 @@ async function main() {
     const beforeFault = await api(context);
     const failedText = "# Fallo de servidor sintético\n\nEl borrador permanece visible.\n";
     let injected = false;
+    const faultSide = "candidate";
+    const faultMethod = faultSide === "base" ? "PUT" : "PATCH";
     const fault = async (route) => {
-      if (route.request().method() === "PUT" && !injected) {
+      if (route.request().method() === faultMethod && !injected) {
         injected = true;
         await route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"Fallo sintético de prueba"}' });
       } else await route.continue();
     };
     await page.route("**/api/work", fault);
-    await page.locator("#base-paste").click();
-    await page.locator("#base-text").fill(failedText);
-    await until(() => page.locator("#base-import-status").evaluate((el) => el.classList.contains("invalid")), "Injected server failure was not shown inline.");
-    check(injected && await page.locator("#base-text").inputValue() === failedText, "Server failure discarded the draft.");
+    await page.locator(`#${faultSide}-paste`).click();
+    await page.locator(`#${faultSide}-text`).fill(failedText);
+    await until(() => page.locator(`#${faultSide}-import-status`).evaluate((el) => el.classList.contains("invalid")), "Injected server failure was not shown inline.");
+    check(injected && await page.locator(`#${faultSide}-text`).inputValue() === failedText, "Server failure discarded the draft.");
     check(same(beforeFault, await api(context)), "Injected failure changed the committed pair.");
     await page.unroute("**/api/work", fault);
-    await page.locator("#base-text").fill(failedText + "Corregido.\n");
-    await until(async () => (await api(context)).base.markdown.endsWith("Corregido.\n"), "Editing after a server error did not recover.");
+    await page.locator(`#${faultSide}-text`).fill(failedText + "Corregido.\n");
+    await until(async () => (await api(context))[faultSide].markdown.endsWith("Corregido.\n"), "Editing after a server error did not recover.");
     await closed(page);
 
     phase = "mobile layout and screenshots";

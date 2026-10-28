@@ -34,6 +34,118 @@ const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 let connectionsVersion = 0;
 let connectionsBusy = false;
 let memosDestination = null;
+let memosSourceVersion = 0;
+let memosSourceBusy = false;
+let memosSourceRevision = null;
+let memosSourceConflict = false;
+
+function activeMemosSource(previous, version) {
+  return Boolean(previous && authentication === previous && memosSourceVersion === version && $("memos-source-dialog").open);
+}
+
+function setMemosSourceBusy(value) {
+  memosSourceBusy = value;
+  $("memos-source-dialog").setAttribute("aria-busy", String(value));
+  const unavailable = value || !$("memos-source-destination").options.length;
+  $("memos-source-destination").disabled = $("memos-source-reference").disabled = unavailable;
+  $("memos-source-open").disabled = unavailable || memosSourceConflict;
+  setBusy(busy);
+}
+
+function closeMemosSource() {
+  memosSourceVersion++;
+  memosSourceRevision = null;
+  memosSourceConflict = false;
+  $("memos-source-reference").value = "";
+  $("memos-source-destination").replaceChildren();
+  $("memos-source-status").textContent = "";
+  $("memos-source-error").textContent = "";
+  $("memos-source-error").hidden = true;
+  setMemosSourceBusy(false);
+  if ($("memos-source-dialog").open) $("memos-source-dialog").close();
+}
+
+async function memosSourceRequest(path, body, method) {
+  const previous = authentication;
+  const version = memosSourceVersion;
+  const data = await request(path, body, method);
+  if (!activeMemosSource(previous, version)) return null;
+  if (!await sameWebSession(previous)) {
+    if (activeMemosSource(previous, version)) endSession();
+    return null;
+  }
+  return activeMemosSource(previous, version) ? data : null;
+}
+
+function memosSourceError(error) {
+  $("memos-source-status").textContent = "";
+  $("memos-source-error").textContent = error.status === 409
+    ? "El trabajo cambió. Cierra y vuelve a abrir este diálogo para reintentar con el trabajo actual."
+    : error instanceof TypeError ? "No se pudo abrir Memos. Comprueba la conexión y vuelve a intentarlo." : error.message || "No se pudo abrir la nota. Vuelve a intentarlo.";
+  $("memos-source-error").hidden = false;
+}
+
+function pendingTextImport() {
+  return Boolean(textDraft && textDraft.version !== textDraft.savedVersion);
+}
+
+async function openMemosSource() {
+  if (busy || memosSourceBusy || pendingTextImport() || !canImport("base")) return;
+  closeConnections();
+  closeMemosSource();
+  memosSourceRevision = session.revision;
+  const version = memosSourceVersion;
+  const previous = authentication;
+  $("memos-source-dialog").showModal();
+  $("memos-source-status").textContent = "Cargando conexiones…";
+  setMemosSourceBusy(true);
+  try {
+    const data = await memosSourceRequest("/api/connections");
+    if (!data) return;
+    const destinations = data.enabled ? (data.destinations || []).filter((item) => item.provider === "memos" && item.connected) : [];
+    for (const destination of destinations) {
+      const option = document.createElement("option");
+      option.value = destination.id; option.textContent = destination.label;
+      $("memos-source-destination").append(option);
+    }
+    $("memos-source-status").textContent = destinations.length ? "Solo se lee el contenido de la nota, sin adjuntos." : "No hay conexiones de Memos disponibles. Conecta tu cuenta desde Conexiones.";
+  } catch (error) { if (activeMemosSource(previous, version)) memosSourceError(error); }
+  finally {
+    if (activeMemosSource(previous, version)) {
+      setMemosSourceBusy(false);
+      if ($("memos-source-destination").options.length) $("memos-source-reference").focus();
+    }
+  }
+}
+
+$("base-memos").addEventListener("click", openMemosSource);
+$("memos-source-close").addEventListener("click", closeMemosSource);
+$("memos-source-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeMemosSource(); });
+$("memos-source-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (memosSourceBusy || memosSourceConflict || !authentication || !$("memos-source-dialog").open || !$("memos-source-destination").value) return;
+  const version = memosSourceVersion;
+  const previous = authentication;
+  const reference = $("memos-source-reference").value.trim();
+  if (!reference) { $("memos-source-reference").focus(); return; }
+  $("memos-source-error").hidden = true;
+  $("memos-source-status").textContent = "Leyendo y guardando la captura…";
+  setMemosSourceBusy(true);
+  try {
+    const snapshot = await memosSourceRequest("/api/sources/memos", {
+      destination: $("memos-source-destination").value, reference, expected_revision: memosSourceRevision,
+    }, "POST");
+    if (!snapshot) return;
+    resetImports();
+    applySession(snapshot);
+    closeMemosSource();
+  } catch (error) {
+    if (activeMemosSource(previous, version)) {
+      memosSourceConflict = error.status === 409;
+      memosSourceError(error);
+    }
+  } finally { if (activeMemosSource(previous, version)) setMemosSourceBusy(false); }
+});
 
 function clearMemosForm() {
   memosDestination = null;
@@ -214,15 +326,17 @@ function showError(error) {
 
 function setBusy(value) {
   busy = value;
+  const working = value || memosSourceBusy;
   for (const id of ["reload-button", "example-button", "delete-work"]) {
-    $(id).disabled = value;
-    $(id).setAttribute("aria-busy", String(value));
+    $(id).disabled = working;
+    $(id).setAttribute("aria-busy", String(working));
   }
-  $("reload-button").disabled = value || !$("base-path").value.trim();
+  $("reload-button").disabled = working || !$("base-path").value.trim();
+  $("base-memos").disabled = working || !canImport("base") || pendingTextImport();
   const pending = textDraft && !textDraft.conflict && textDraft.version !== textDraft.savedVersion && textDraft.version !== textDraft.failedVersion;
   for (const side of ["base", "candidate"]) {
     for (const control of ["paste", "upload", "file"]) {
-      $(`${side}-${control}`).disabled = value || !canImport(side) || Boolean(pending && !(side === textDraft.side && control === "paste"));
+      $(`${side}-${control}`).disabled = working || !canImport(side) || Boolean(pending && !(side === textDraft.side && control === "paste"));
     }
   }
 }
@@ -264,10 +378,11 @@ async function replaceSide(work, side, document) {
     throw new Error("Cada documento admite hasta 2 MiB en UTF-8.");
   }
   if (side === "candidate" && !work.base) throw new Error("Abre primero el original.");
+  if (side === "candidate") return request("/api/work", { expected_revision: work.revision, candidate: document }, "PATCH");
   return request("/api/work", {
     expected_revision: work.revision,
-    base: side === "base" ? document : work.base,
-    candidate: side === "candidate" ? document : work.candidate,
+    base: document,
+    candidate: work.candidate,
   }, "PUT");
 }
 
@@ -468,6 +583,32 @@ async function refresh() {
 
 function fileName(path) { return path?.split(/[\\/]/).pop() || ""; }
 
+function renderBaseSource() {
+  const node = $("base-provenance");
+  const source = hosted && authentication && session?.base_source;
+  node.replaceChildren();
+  node.hidden = !source;
+  if (!source) return;
+  const label = `Memos · ${source.resource}`;
+  let url;
+  try {
+    url = new URL(source.url);
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.origin === window.location.origin;
+    if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password) url = null;
+  } catch { url = null; }
+  const origin = document.createElement(url ? "a" : "span");
+  origin.textContent = label;
+  if (url) { origin.href = url.href; origin.target = "_blank"; origin.rel = "noopener noreferrer"; }
+  node.append(origin);
+  const captured = new Date(source.captured_at * 1000);
+  if (Number.isFinite(source.captured_at) && !Number.isNaN(captured.valueOf())) {
+    const time = document.createElement("time");
+    time.dateTime = captured.toISOString();
+    time.textContent = `Capturado ${captured.toLocaleString("es", { dateStyle: "medium", timeStyle: "short" })}`;
+    node.append(time);
+  }
+}
+
 function cell(block, status) {
   const node = document.createElement("div");
   node.className = `cell ${status}`;
@@ -541,6 +682,7 @@ function render() {
   }
   $("base-name").textContent = (hosted ? session?.base_path : fileName(session?.base_path)) || "Sin archivo";
   $("candidate-name").textContent = (hosted ? session?.candidate_path : fileName(session?.candidate_path)) || "Sin archivo";
+  renderBaseSource();
   if (!hasDocument) {
     changes = [];
     changeIndex = -1;
@@ -640,7 +782,7 @@ $("source-tab").addEventListener("click", () => { if (format === "source") retur
 $("previous-change").addEventListener("click", () => navigateChange(-1));
 $("next-change").addEventListener("click", () => navigateChange(1));
 document.addEventListener("keydown", (event) => {
-  if ($("connections-dialog").open || event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,textarea,[contenteditable=true]")) return;
+  if ($("connections-dialog").open || $("memos-source-dialog").open || event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,select,textarea,[contenteditable=true]")) return;
   if (event.key === "j" || event.key === "k") { event.preventDefault(); navigateChange(event.key === "j" ? 1 : -1); }
 });
 
@@ -658,6 +800,7 @@ function hostedView(title, description) {
 function endSession() {
   authentication = null;
   closeConnections();
+  closeMemosSource();
   resetImports();
   clearTimeout(reconnectTimer);
   events?.close();
@@ -727,6 +870,7 @@ function connectEvents() {
 $("login-button").addEventListener("click", () => { window.location.assign("/auth/login"); });
 $("logout-button").addEventListener("click", async () => {
   closeConnections();
+  closeMemosSource();
   $("logout-button").disabled = true;
   try {
     await request("/auth/logout", {});

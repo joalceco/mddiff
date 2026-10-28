@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OnceCell, RwLock, watch};
 
 use crate::{
-    AppError, MAX_DOCUMENT_BYTES, diff,
+    AppError, MAX_DOCUMENT_BYTES,
+    connections::Provider,
+    diff,
     storage::{Storage, conflict},
 };
 
@@ -36,11 +38,25 @@ pub struct Document {
     pub markdown: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMetadata {
+    pub provider: Provider,
+    pub destination: String,
+    pub resource: String,
+    pub url: String,
+    pub captured_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 #[derive(Default, Serialize)]
 pub struct Work {
     pub revision: u64,
     pub base: Option<Document>,
     pub candidate: Option<Document>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_source: Option<SourceMetadata>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +66,8 @@ pub struct Snapshot {
     pub candidate_path: Option<String>,
     pub comparison: Option<diff::Comparison>,
     pub processing_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_source: Option<SourceMetadata>,
 }
 
 #[derive(Default)]
@@ -123,6 +141,7 @@ impl Workspace {
                     candidate_path: None,
                     comparison: None,
                     processing_ms: 0.0,
+                    base_source: None,
                 }),
                 work: Arc::new(Work::default()),
             }),
@@ -181,15 +200,22 @@ impl Workspace {
         base: Document,
         candidate: Option<Document>,
     ) -> Result<Arc<Snapshot>, AppError> {
-        self.update(Some(expected), move || Ok((Some(base), candidate)))
-            .await
+        self.update(Some(expected), None, move || {
+            Ok(Work {
+                base: Some(base),
+                candidate,
+                ..Work::default()
+            })
+        })
+        .await
     }
 
     pub async fn clear_if_revision(
         self: &Arc<Self>,
         expected: u64,
     ) -> Result<Arc<Snapshot>, AppError> {
-        self.update(Some(expected), || Ok((None, None))).await
+        self.update(Some(expected), None, || Ok(Work::default()))
+            .await
     }
 
     pub async fn propose_if_revision(
@@ -212,8 +238,44 @@ impl Workspace {
             })?
             .clone();
         // The update checks the same revision again under the owner's lock.
-        self.replace_if_revision(expected, base, Some(candidate))
-            .await
+        let base_source = work.base_source.clone();
+        self.update(Some(expected), None, move || {
+            Ok(Work {
+                base: Some(base),
+                candidate: Some(candidate),
+                base_source,
+                ..Work::default()
+            })
+        })
+        .await
+    }
+
+    pub async fn capture_base_if_revision(
+        self: &Arc<Self>,
+        expected: u64,
+        base: Document,
+        source: SourceMetadata,
+        connection_generation: u64,
+    ) -> Result<Arc<Snapshot>, AppError> {
+        if self.storage.is_none() {
+            return Err(AppError::bad_request(
+                "La captura de fuentes requiere almacenamiento alojado.",
+            ));
+        }
+        let work = self.work().await;
+        if work.revision != expected {
+            return Err(conflict());
+        }
+        let candidate = work.candidate.clone();
+        self.update(Some(expected), Some(connection_generation), move || {
+            Ok(Work {
+                base: Some(base),
+                candidate,
+                base_source: Some(source),
+                ..Work::default()
+            })
+        })
+        .await
     }
 
     pub(crate) async fn load(
@@ -225,9 +287,13 @@ impl Workspace {
                 "El trabajo alojado requiere una revisión esperada.",
             ));
         }
-        self.update(None, move || {
+        self.update(None, None, move || {
             let (base, candidate) = read()?;
-            Ok((Some(base), candidate))
+            Ok(Work {
+                base: Some(base),
+                candidate,
+                ..Work::default()
+            })
         })
         .await
     }
@@ -235,7 +301,8 @@ impl Workspace {
     async fn update(
         self: &Arc<Self>,
         expected: Option<u64>,
-        read: impl FnOnce() -> Result<(Option<Document>, Option<Document>), AppError> + Send + 'static,
+        connection_generation: Option<u64>,
+        read: impl FnOnce() -> Result<Work, AppError> + Send + 'static,
     ) -> Result<Arc<Snapshot>, AppError> {
         let workspace = Arc::clone(self);
         // Finish commit and publication even if the requesting browser disconnects.
@@ -252,23 +319,11 @@ impl Workspace {
             let storage = workspace.storage.clone();
             let current = tokio::task::spawn_blocking(move || {
                 let started = Instant::now();
-                let (base, candidate) = read()?;
-                let current = prepare(
-                    Work {
-                        revision: next,
-                        base,
-                        candidate,
-                    },
-                    expected.is_some(),
-                    started,
-                )?;
+                let mut work = read()?;
+                work.revision = next;
+                let current = prepare(work, expected.is_some(), started)?;
                 if let Some((store, owner)) = storage {
-                    store.replace(
-                        &owner,
-                        revision,
-                        current.work.base.as_ref(),
-                        current.work.candidate.as_ref(),
-                    )?;
+                    store.replace(&owner, revision, &current.work, connection_generation)?;
                 }
                 Ok::<_, AppError>(current)
             })
@@ -285,6 +340,11 @@ impl Workspace {
 }
 
 fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Current, AppError> {
+    if work.base.is_none() && work.base_source.is_some() {
+        return Err(AppError::bad_request(
+            "La procedencia requiere un documento original.",
+        ));
+    }
     for document in work.base.iter().chain(work.candidate.iter()) {
         if document.markdown.len() as u64 > MAX_DOCUMENT_BYTES {
             return Err(AppError(
@@ -316,6 +376,7 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
         candidate_path: work.candidate.as_ref().map(|d| d.label.clone()),
         comparison,
         processing_ms: started.elapsed().as_secs_f64() * 1000.0,
+        base_source: work.base_source.clone(),
     });
     Ok(Current {
         snapshot,
@@ -326,7 +387,12 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
+
+    static DATABASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn identity(issuer: &str, subject: &str) -> VerifiedIdentity {
         VerifiedIdentity::from_verified_claims(issuer.into(), subject.into()).unwrap()
@@ -336,6 +402,362 @@ mod tests {
             label: "synthetic.md".into(),
             markdown: text.into(),
         }
+    }
+
+    fn source() -> SourceMetadata {
+        SourceMetadata {
+            provider: Provider::Memos,
+            destination: "notes".into(),
+            resource: "memos/synthetic-1".into(),
+            url: "https://notes.example/memos/synthetic-1".into(),
+            captured_at: 123456,
+            updated_at: Some("2026-10-28T12:00:00Z".into()),
+        }
+    }
+
+    fn connect(store: &Workspaces, owner: &VerifiedIdentity, expected: u64) -> u64 {
+        store
+            .storage
+            .as_ref()
+            .unwrap()
+            .replace_connection(
+                owner,
+                "memos",
+                "notes",
+                expected,
+                Some(crate::storage::EncryptedCredential {
+                    nonce: [0; 12],
+                    ciphertext: vec![0; 16],
+                }),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn captured_source_survives_restart_proposals_and_disconnect_but_explicit_replacement_clears_it()
+     {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        let expected_source = serde_json::to_value(source()).unwrap();
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            assert!(
+                serde_json::to_value(workspace.work().await)
+                    .unwrap()
+                    .get("base_source")
+                    .is_none()
+            );
+            assert!(
+                serde_json::to_value(workspace.snapshot().await)
+                    .unwrap()
+                    .get("base_source")
+                    .is_none()
+            );
+            workspace
+                .replace_if_revision(
+                    0,
+                    document("old original"),
+                    Some(document("preserved proposal\r\n")),
+                )
+                .await
+                .unwrap();
+            connect(&store, &owner, 0);
+            let captured = workspace
+                .capture_base_if_revision(1, document("captured original\r\n"), source(), 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&captured.base_source).unwrap(),
+                expected_source
+            );
+            assert_eq!(
+                workspace.work().await.candidate.as_ref().unwrap().markdown,
+                "preserved proposal\r\n"
+            );
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .replace_connection(&owner, "memos", "notes", 1, None)
+                .unwrap();
+            workspace
+                .propose_if_revision(2, document("updated proposal"))
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&workspace.work().await.base_source).unwrap(),
+                expected_source
+            );
+        }
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            let work = workspace.work().await;
+            assert_eq!(work.revision, 3);
+            assert_eq!(
+                work.base.as_ref().unwrap().markdown,
+                "captured original\r\n"
+            );
+            assert_eq!(
+                work.candidate.as_ref().unwrap().markdown,
+                "updated proposal"
+            );
+            assert_eq!(
+                serde_json::to_value(&work.base_source).unwrap(),
+                expected_source
+            );
+            assert_eq!(
+                serde_json::to_value(&workspace.snapshot().await.base_source).unwrap(),
+                expected_source
+            );
+            workspace
+                .replace_if_revision(3, document("pasted original"), None)
+                .await
+                .unwrap();
+            assert!(workspace.work().await.base_source.is_none());
+            assert!(workspace.snapshot().await.base_source.is_none());
+            connect(&store, &owner, 2);
+            let mut without_update = source();
+            without_update.updated_at = None;
+            assert!(
+                serde_json::to_value(&without_update)
+                    .unwrap()
+                    .get("updated_at")
+                    .is_none()
+            );
+            workspace
+                .capture_base_if_revision(4, document("captured again"), without_update, 3)
+                .await
+                .unwrap();
+            workspace.clear_if_revision(5).await.unwrap();
+            assert!(workspace.work().await.base_source.is_none());
+            assert!(workspace.snapshot().await.base_source.is_none());
+        }
+        let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
+        let row: (i64, bool) = connection
+            .query_row(
+                "SELECT revision,base_source IS NULL FROM current_work",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (6, true));
+    }
+
+    #[tokio::test]
+    async fn stale_or_disconnected_capture_preserves_work_snapshot_and_events() {
+        let directory = Database::new();
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let alice = identity("issuer", "alice");
+        let bob = identity("issuer", "bob");
+        let workspace = store.for_user(&alice).await.unwrap();
+        workspace
+            .replace_if_revision(0, document("current"), Some(document("proposal")))
+            .await
+            .unwrap();
+        connect(&store, &bob, 0);
+        let before = workspace.snapshot().await;
+        let events = workspace.subscribe();
+        for metadata in [
+            source(),
+            SourceMetadata {
+                destination: "another".into(),
+                ..source()
+            },
+            SourceMetadata {
+                provider: Provider::Jira,
+                ..source()
+            },
+        ] {
+            assert_eq!(
+                workspace
+                    .capture_base_if_revision(1, document("must not save"), metadata, 1)
+                    .await
+                    .err()
+                    .unwrap()
+                    .0,
+                axum::http::StatusCode::CONFLICT
+            );
+            assert!(Arc::ptr_eq(&before, &workspace.snapshot().await));
+            assert!(!events.has_changed().unwrap());
+        }
+        connect(&store, &alice, 0);
+        assert_eq!(
+            workspace
+                .capture_base_if_revision(0, document("late original"), source(), 1)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            axum::http::StatusCode::CONFLICT
+        );
+        connect(&store, &alice, 1);
+        assert_eq!(
+            workspace
+                .capture_base_if_revision(1, document("old credential generation"), source(), 1)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            axum::http::StatusCode::CONFLICT
+        );
+        store
+            .storage
+            .as_ref()
+            .unwrap()
+            .replace_connection(&alice, "memos", "notes", 2, None)
+            .unwrap();
+        // Even knowing the tombstone's current generation cannot authorize a capture.
+        assert_eq!(
+            workspace
+                .capture_base_if_revision(1, document("disconnected original"), source(), 3)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            axum::http::StatusCode::CONFLICT
+        );
+        assert!(Arc::ptr_eq(&before, &workspace.snapshot().await));
+        assert!(!events.has_changed().unwrap());
+        assert_eq!(
+            workspace.work().await.candidate.as_ref().unwrap().markdown,
+            "proposal"
+        );
+        assert_eq!(
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .read(&alice)
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_capture_preparation_is_checked_before_the_durable_commit() {
+        let directory = Database::new();
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let owner = identity("issuer", "alice");
+        let workspace = store.for_user(&owner).await.unwrap();
+        workspace
+            .replace_if_revision(0, document("keep me"), None)
+            .await
+            .unwrap();
+        connect(&store, &owner, 0);
+        let before = workspace.snapshot().await;
+        let events = workspace.subscribe();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&workspace);
+        let capture = tokio::spawn(async move {
+            worker
+                .update(Some(1), Some(1), move || {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                    Ok(Work {
+                        base: Some(document("late remote response")),
+                        base_source: Some(source()),
+                        ..Work::default()
+                    })
+                })
+                .await
+        });
+        ready.await.unwrap();
+        store
+            .storage
+            .as_ref()
+            .unwrap()
+            .replace_connection(&owner, "memos", "notes", 1, None)
+            .unwrap();
+        release.send(()).unwrap();
+        assert_eq!(
+            capture.await.unwrap().err().unwrap().0,
+            axum::http::StatusCode::CONFLICT
+        );
+        assert!(Arc::ptr_eq(&before, &workspace.snapshot().await));
+        assert!(!events.has_changed().unwrap());
+        assert_eq!(
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .read(&owner)
+                .unwrap()
+                .base
+                .unwrap()
+                .markdown,
+            "keep me"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_two_migration_preserves_work_and_encrypted_connections() {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            store
+                .for_user(&owner)
+                .await
+                .unwrap()
+                .replace_if_revision(
+                    0,
+                    document("schema two original"),
+                    Some(document("schema two proposal")),
+                )
+                .await
+                .unwrap();
+            connect(&store, &owner, 0);
+        }
+        let database = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
+        database
+            .execute_batch(
+                "ALTER TABLE current_work DROP COLUMN base_source; PRAGMA user_version=2;",
+            )
+            .unwrap();
+        drop(database);
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let work = store.for_user(&owner).await.unwrap().work().await;
+        assert_eq!(work.revision, 1);
+        assert_eq!(work.base.as_ref().unwrap().markdown, "schema two original");
+        assert_eq!(
+            work.candidate.as_ref().unwrap().markdown,
+            "schema two proposal"
+        );
+        assert!(work.base_source.is_none());
+        let connection = store
+            .storage
+            .as_ref()
+            .unwrap()
+            .read_connection(&owner, "memos", "notes")
+            .unwrap();
+        assert_eq!(connection.generation, 1);
+        assert_eq!(connection.encrypted.unwrap().ciphertext, vec![0; 16]);
+        assert_eq!(
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .database_for_test()
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn ordinary_document_inputs_cannot_claim_source_metadata() {
+        for key in ["source", "base_source"] {
+            let mut forged = serde_json::json!({"label":"pasted.md", "markdown":"# Pasted"});
+            forged[key] = serde_json::to_value(source()).unwrap();
+            assert!(serde_json::from_value::<Document>(forged).is_err());
+        }
+        let mut forged = serde_json::to_value(source()).unwrap();
+        forged["owner_id"] = "someone-else".into();
+        assert!(serde_json::from_value::<SourceMetadata>(forged).is_err());
     }
 
     #[tokio::test]
@@ -384,12 +806,13 @@ mod tests {
     impl Database {
         fn new() -> Self {
             Self(std::env::temp_dir().join(format!(
-                    "mddiff-work-{}-{}",
+                    "mddiff-work-{}-{}-{}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    DATABASE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
                 )))
         }
     }
@@ -565,10 +988,13 @@ mod tests {
         let worker = Arc::clone(&workspace);
         let request = tokio::spawn(async move {
             worker
-                .update(Some(0), move || {
+                .update(Some(0), None, move || {
                     entered.send(()).unwrap();
                     wait.recv().unwrap();
-                    Ok((Some(document("committed despite disconnect")), None))
+                    Ok(Work {
+                        base: Some(document("committed despite disconnect")),
+                        ..Work::default()
+                    })
                 })
                 .await
         });
@@ -604,7 +1030,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            2
+            3
         );
         let columns: i32 = connection
             .query_row(
@@ -613,8 +1039,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(columns, 7);
-        connection.pragma_update(None, "user_version", 3).unwrap();
+        assert_eq!(columns, 8);
+        connection.pragma_update(None, "user_version", 4).unwrap();
         drop(connection);
         assert!(Workspaces::persistent(&directory.0).is_err());
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
@@ -622,7 +1048,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 

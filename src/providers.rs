@@ -17,7 +17,7 @@ use axum::{
 use mddiff::{
     AppError,
     connections::{ConnectionStore, CredentialRecord, Provider},
-    workspace::VerifiedIdentity,
+    workspace::{Document, SourceMetadata, VerifiedIdentity},
 };
 use openidconnect::{CsrfToken, url::Url};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ use crate::{App, auth::SessionHandle};
 const SCOPES: &str = "read:jira-work offline_access";
 const CALLBACK: &str = "/connections/jira/callback";
 const RESPONSE_LIMIT: usize = 256 * 1024;
+const MEMO_RESPONSE_LIMIT: usize = 6 * mddiff::MAX_DOCUMENT_BYTES as usize + 64 * 1024;
 
 fn invalid() -> AppError {
     AppError::bad_request(
@@ -161,6 +162,56 @@ fn identifier(s: &str) -> bool {
         && s.len() <= 64
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn memo_resource(reference: &str, destination: &Url) -> Result<String, AppError> {
+    let reference = reference.trim();
+    let bad = || {
+        AppError::bad_request(
+            "Usa el ID de una nota o su URL /memos/ID en la instancia seleccionada, sin parámetros ni fragmentos.",
+        )
+    };
+    if reference.is_empty()
+        || reference.len() > 2048
+        || reference.contains(['%', '\\'])
+        || reference.chars().any(char::is_control)
+    {
+        return Err(bad());
+    }
+    let id = if let Ok(url) = Url::parse(reference) {
+        let raw_path = reference
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|start| &rest[start..]))
+            .ok_or_else(bad)?;
+        if url.origin() != destination.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || raw_path != url.path()
+        {
+            return Err(bad());
+        }
+        url.path()
+            .strip_prefix("/memos/")
+            .ok_or_else(bad)?
+            .to_owned()
+    } else {
+        reference
+            .strip_prefix("memos/")
+            .unwrap_or(reference)
+            .to_owned()
+    };
+    if id == "-"
+        || id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(bad());
+    }
+    Ok(format!("memos/{id}"))
 }
 fn loopback_url(url: &Url) -> bool {
     url.host_str() == Some("localhost")
@@ -343,6 +394,7 @@ impl Providers {
         pins: &[IpAddr],
         token: Option<&str>,
         body: Option<Value>,
+        limit: usize,
     ) -> Result<Value, AppError> {
         let host = url.host_str().ok_or_else(failed)?;
         let port = url.port_or_known_default().ok_or_else(failed)?;
@@ -380,15 +432,13 @@ impl Providers {
         }
         let mut response = request.send().await.map_err(|_| failed())?;
         if !response.status().is_success()
-            || response
-                .content_length()
-                .is_some_and(|n| n > RESPONSE_LIMIT as u64)
+            || response.content_length().is_some_and(|n| n > limit as u64)
         {
             return Err(failed());
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| failed())? {
-            if bytes.len() + chunk.len() > RESPONSE_LIMIT {
+            if bytes.len() + chunk.len() > limit {
                 return Err(failed());
             }
             bytes.extend_from_slice(&chunk);
@@ -431,6 +481,7 @@ impl Providers {
                 &d.pins,
                 Some(token),
                 None,
+                RESPONSE_LIMIT,
             )
             .await?;
         if !result["user"]["name"]
@@ -442,6 +493,80 @@ impl Providers {
         Ok(())
     }
 
+    async fn read_memo(
+        &self,
+        owner: &VerifiedIdentity,
+        destination: &str,
+        reference: &str,
+    ) -> Result<(Document, SourceMetadata, u64), AppError> {
+        let d = self.destination(destination)?;
+        if d.provider != Provider::Memos {
+            return Err(AppError::bad_request("Elige una conexión de Memos."));
+        }
+        let resource = memo_resource(reference, &d.url)?;
+        let stored = self
+            .store
+            .get(owner, d.provider, &d.id)
+            .await?
+            .ok_or_else(|| {
+                AppError(
+                    StatusCode::CONFLICT,
+                    "Conecta Memos antes de abrir una nota.".into(),
+                )
+            })?;
+        let credential: Credential =
+            serde_json::from_value(stored.credential.value().clone()).map_err(|_| failed())?;
+        if credential.binding != d.binding(&self.jira) {
+            return Err(failed());
+        }
+        // Public notes must not turn an invalid personal credential into anonymous access.
+        self.memos_identity(d, &credential.access_token).await?;
+        let memo = self
+            .request(
+                d.url.join(&format!("/api/v1/{resource}")).unwrap(),
+                &d.pins,
+                Some(&credential.access_token),
+                None,
+                MEMO_RESPONSE_LIMIT,
+            )
+            .await?;
+        if memo["name"].as_str() != Some(&resource) {
+            return Err(failed());
+        }
+        let markdown = memo["content"].as_str().ok_or_else(failed)?;
+        if markdown.len() as u64 > mddiff::MAX_DOCUMENT_BYTES {
+            return Err(AppError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Cada documento admite hasta 2 MiB.".into(),
+            ));
+        }
+        let updated_at = match memo.get("updateTime") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value))
+                if value.len() <= 64 && !value.chars().any(char::is_control) =>
+            {
+                Some(value.clone())
+            }
+            _ => return Err(failed()),
+        };
+        let id = resource.strip_prefix("memos/").unwrap();
+        Ok((
+            Document {
+                label: format!("Memos · {id}.md"),
+                markdown: markdown.into(),
+            },
+            SourceMetadata {
+                provider: Provider::Memos,
+                destination: d.id.clone(),
+                url: d.url.join(&resource).unwrap().into(),
+                resource,
+                captured_at: now(),
+                updated_at,
+            },
+            stored.metadata.generation,
+        ))
+    }
+
     async fn jira_resources(&self, d: &Destination, token: &str) -> Result<(), AppError> {
         let result = self
             .request(
@@ -449,6 +574,7 @@ impl Providers {
                 &[],
                 Some(token),
                 None,
+                RESPONSE_LIMIT,
             )
             .await?;
         let allowed = result.as_array().is_some_and(|items| {
@@ -486,6 +612,7 @@ impl Providers {
                 &[],
                 None,
                 Some(grant),
+                RESPONSE_LIMIT,
             )
             .await?;
         let access = result["access_token"]
@@ -534,6 +661,13 @@ struct MemosInput {
     acknowledge_full_access: bool,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoCapture {
+    destination: String,
+    reference: String,
+    expected_revision: u64,
+}
+#[derive(Deserialize)]
 struct Callback {
     code: Option<String>,
     state: Option<String>,
@@ -551,12 +685,47 @@ fn providers(app: &App) -> Result<&Arc<Providers>, AppError> {
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
+        .route("/api/sources/memos", post(capture_memo))
         .route("/api/connections", get(list))
         .route("/api/connections/{id}/memos", post(memos))
         .route("/api/connections/{id}/authorize", post(authorize))
         .route("/api/connections/{id}/check", post(check))
         .route("/api/connections/{id}", axum::routing::delete(disconnect))
         .route(CALLBACK, get(callback))
+}
+
+async fn capture_memo(
+    State(app): State<Arc<App>>,
+    Extension(owner): Extension<VerifiedIdentity>,
+    Extension(session): Extension<SessionHandle>,
+    payload: Result<Json<MemoCapture>, JsonRejection>,
+) -> Result<Json<Arc<mddiff::workspace::Snapshot>>, AppError> {
+    let input = crate::json_payload(payload)?;
+    let workspace = app.workspace(Some(Extension(owner.clone()))).await?;
+    if workspace.work().await.revision != input.expected_revision {
+        return Err(AppError(
+            StatusCode::CONFLICT,
+            "El trabajo cambió. Recarga antes de abrir otra nota.".into(),
+        ));
+    }
+    let p = providers(&app)?;
+    let (base, source, generation) = p
+        .read_memo(&owner, &input.destination, &input.reference)
+        .await?;
+    if app
+        .auth
+        .as_ref()
+        .ok_or_else(failed)?
+        .revalidate(&session)
+        .await?
+        != owner
+    {
+        return Err(failed());
+    }
+    workspace
+        .capture_base_if_revision(input.expected_revision, base, source, generation)
+        .await
+        .map(Json)
 }
 
 async fn list(
@@ -788,6 +957,35 @@ async fn disconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memo_references_are_local_resources_not_urls_to_fetch() {
+        let origin = Url::parse("https://notes.example/").unwrap();
+        for reference in [
+            "note-1",
+            "memos/note-1",
+            "https://notes.example/memos/note-1",
+        ] {
+            assert_eq!(memo_resource(reference, &origin).unwrap(), "memos/note-1");
+        }
+        for bad in [
+            "",
+            "-",
+            "../note-1",
+            "memos/../note-1",
+            "https://other.example/memos/note-1",
+            "https://notes.example.evil/memos/note-1",
+            "https://user@notes.example/memos/note-1",
+            "https://notes.example/memos/note-1?token=private",
+            "https://notes.example/memos/note-1#part",
+            "https://notes.example/memos/a/../note-1",
+            "https://notes.example/memos/%6eote-1",
+            "https://notes.example\\memos\\note-1",
+            "https://notes.example/api/v1/memos/note-1",
+            "https://notes.example/memos/shares/secret",
+        ] {
+            assert!(memo_resource(bad, &origin).is_err(), "{bad}");
+        }
+    }
     #[test]
     fn destinations_and_network_are_closed_to_arbitrary_hosts_and_metadata() {
         for bad in [

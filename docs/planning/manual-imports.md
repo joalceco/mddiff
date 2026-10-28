@@ -4,6 +4,8 @@ Fecha: 2026-10-27. Issue: [#6](https://github.com/joalceco/mddiff/issues/6). Ram
 
 Este documento registra S05 y la importación desde el navegador. La entrega posterior [S06: agentes remotos](remote-agents.md) incorpora propuestas por API y MCP con identidad de usuario.
 
+Desde [S08: captura de Memos](memos-source.md), pegar o subir una propuesta utiliza `PATCH /api/work` para conservar la procedencia del original. Reemplazar el original manualmente mediante PUT elimina esa procedencia.
+
 ## Resultado y alcance
 
 Una persona autenticada puede abrir el original y la propuesta desde las cabeceras del visor alojado mediante **Pegar texto** o **Subir .md**. La apertura y la comparación son automáticas. Se conserva el visor sin lateral y no se añade un botón para aplicar o comparar.

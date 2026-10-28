@@ -44,6 +44,22 @@
     </form>
     <p class="connections-note">Desconectar elimina la credencial de mddiff y conserva el trabajo. Para revocarla en el proveedor, retira el token de Memos o el acceso de mddiff en Atlassian.</p>
   </dialog>
+  <dialog id="memos-source-dialog" class="connections-dialog" aria-labelledby="memos-source-title" aria-describedby="memos-source-description">
+    <div class="connections-heading">
+      <h2 id="memos-source-title">Abrir Memos</h2>
+      <button id="memos-source-close" type="button" aria-label="Cerrar Abrir Memos">Cerrar</button>
+    </div>
+    <p id="memos-source-description">La nota reemplaza el original y conserva la propuesta actual. Se guarda una captura; no se sincroniza automáticamente.</p>
+    <p id="memos-source-status" class="connections-status" role="status"></p>
+    <p id="memos-source-error" class="connections-error" role="alert" hidden></p>
+    <form id="memos-source-form" class="memos-source-form" autocomplete="off">
+      <label for="memos-source-destination">Conexión de Memos</label>
+      <select id="memos-source-destination" name="destination" required disabled></select>
+      <label for="memos-source-reference">ID o URL de la nota</label>
+      <input id="memos-source-reference" name="reference" placeholder="memos/abc123 o URL de esta instancia" aria-describedby="memos-source-description" autocomplete="off" spellcheck="false" required disabled>
+      <div class="connection-form-actions"><button id="memos-source-open" type="submit" disabled>Abrir</button></div>
+    </form>
+  </dialog>
   <div class="workspace">
     <main>
       <div class="toolbar">
@@ -76,7 +92,9 @@
           <div id="base-source-actions" class="source-actions" hidden>
             <button id="base-paste" type="button" aria-label="Pegar texto del original" aria-controls="base-text" aria-expanded="false" disabled>Pegar texto</button>
             <button id="base-upload" type="button" aria-label="Subir Markdown original" disabled>Subir .md</button>
+            <button id="base-memos" type="button" aria-haspopup="dialog" aria-controls="memos-source-dialog" disabled>Abrir Memos</button>
           </div>
+          <div id="base-provenance" class="source-provenance" hidden></div>
           <input id="base-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown original" hidden disabled>
           <textarea id="base-text" class="paste-text" rows="4" aria-label="Markdown del original" aria-describedby="base-import-status" placeholder="Pega aquí el Markdown del original…" spellcheck="false" hidden></textarea>
           <span id="base-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>

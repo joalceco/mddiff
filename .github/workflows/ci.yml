@@ -33,6 +33,8 @@ jobs:
         run: npx --prefix tests/browser playwright install --with-deps chromium
       - name: Test personal connection controls in Chromium
         run: node tests/browser/connections.mjs
+      - name: Test Memos capture controls in Chromium
+        run: node tests/browser/memos.mjs
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test hosted authentication
@@ -45,6 +47,8 @@ jobs:
         run: python3 scripts/test_hosted_mcp.py
       - name: Test private read-only provider connections
         run: python3 scripts/test_connections.py
+      - name: Test private Memos source capture
+        run: python3 scripts/test_memos_source.py
       - name: Remove synthetic Keycloak
         if: always()
         run: python3 spikes/identity/keycloak.py down

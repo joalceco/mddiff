@@ -82,7 +82,7 @@ Acepta un objeto vacío:
 {}
 ```
 
-Devuelve `revision`, `base`, `candidate` y `viewer_url`. Cada documento incluye `label` y `markdown`; si el espacio está vacío, sus lados son `null`. La herramienta no cambia la revisión.
+Devuelve `revision`, `base`, `candidate` y `viewer_url`. Cada documento incluye `label` y `markdown`; si el espacio está vacío, sus lados son `null`. Desde S08 incluye además `base_source` en el nivel superior cuando el original tiene [procedencia capturada](memos-source.md). La herramienta no cambia la revisión; enviar una propuesta conserva esa procedencia.
 
 ### `submit_proposal`
 

@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Rama: `feature/multiuser-sources`.
 
-Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente.
+Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. [S08: captura de Memos](memos-source.md) añade procedencia en el esquema 3.
 
 ## Resultado y alcance
 
@@ -51,7 +51,7 @@ Los permisos son control de acceso del sistema de archivos, **no cifrado**: el M
 
 ## Modelo de datos y confirmación de escrituras
 
-La base utiliza [rusqlite 0.41](https://docs.rs/rusqlite/0.41.0/rusqlite/) con SQLite incorporado y una tabla `current_work` sin `ROWID`. Su clave primaria es `(issuer, subject)`; hay como máximo una fila por identidad que haya guardado o borrado un trabajo. S04 creó el esquema 1; [S07: conexiones personales](personal-connections.md) lo migra al esquema 2, conservando este trabajo y añadiendo credenciales cifradas en una tabla separada.
+La base utiliza [rusqlite 0.41](https://docs.rs/rusqlite/0.41.0/rusqlite/) con SQLite incorporado y una tabla `current_work` sin `ROWID`. Su clave primaria es `(issuer, subject)`; hay como máximo una fila por identidad que haya guardado o borrado un trabajo. S04 creó el esquema 1; S07 añadió conexiones cifradas en una tabla separada y S08 incorpora `base_source` para la procedencia del original en el esquema 3.
 
 La fila contiene la revisión y cuatro campos de contenido: `base_label`, `base_markdown`, `candidate_label` y `candidate_markdown`. Puede conservar un original sin propuesta. No se guardan versiones anteriores, HTML renderizado o diffs históricos.
 
@@ -142,7 +142,7 @@ Si se pierde la respuesta o el cliente se desconecta durante una escritura, cons
 
 No elimines WAL/SHM ni copies únicamente `work.sqlite3` mientras una instancia está abierta: los archivos auxiliares pueden formar parte del estado confirmado. Véase [el archivo WAL como parte del estado persistente](https://sqlite.org/wal.html#the_wal_file). Esta historia no implementa un mecanismo de backup ni una reparación automática de bases.
 
-Una base con `user_version > 2` se rechaza al iniciar. No hay downgrade automático; no reduzcas manualmente ese número para abrirla con un binario anterior. Un binario anterior a S07 rechaza el esquema 2: conserva una copia coherente antes de actualizar si necesitas volver a ese binario.
+Una base con `user_version > 3` se rechaza al iniciar. No hay downgrade automático; no reduzcas manualmente ese número para abrirla con un binario anterior. Un binario anterior a S08 rechaza el esquema 3: conserva una copia coherente antes de actualizar si necesitas volver a ese binario.
 
 ## Borrado funcional, copias y retención
 

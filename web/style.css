@@ -73,4 +73,12 @@ main{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden
 .connection-form-actions{justify-content:flex-end}
 .connections-dialog .connections-note{border-top:1px solid var(--line);padding-top:14px;font-size:11px;margin-bottom:0}
 :root[data-theme=dark] .connections-dialog{background:#141516}
-@media(max-width:700px){.connections-dialog{padding:18px}.connections-list>li{align-items:flex-start;flex-direction:column;gap:12px}.connection-actions{justify-content:flex-start}.connections-heading h2{font-size:18px}.app-header:has(#connections-button:not([hidden])){height:96px;flex-wrap:wrap;align-content:center;gap:8px}.app-header:has(#connections-button:not([hidden])) .header-actions{flex-basis:100%;margin-left:0;justify-content:space-between}.app-header:has(#connections-button:not([hidden]))+.connections-dialog+.workspace{height:calc(100dvh - 96px)}}
+.memos-source-form{display:grid;gap:8px;margin-top:20px}
+.memos-source-form label{font-size:12px;color:var(--ink)}
+.memos-source-form select{width:100%;min-width:0;font:12px/1.5 var(--mono);border:1px solid var(--line);border-radius:4px;padding:8px 10px;background:#fff;color:var(--accent)}
+.memos-source-form select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.memos-source-form .connection-form-actions{margin-top:8px}
+.source-provenance{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 12px;font:10px/1.6 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.source-provenance a{color:inherit;text-underline-offset:3px}
+:root[data-theme=dark] .memos-source-form select{background:#141516}
+@media(max-width:700px){.connections-dialog{padding:18px}.connections-list>li{align-items:flex-start;flex-direction:column;gap:12px}.connection-actions{justify-content:flex-start}.connections-heading h2{font-size:18px}.app-header:has(#connections-button:not([hidden])){height:96px;flex-wrap:wrap;align-content:center;gap:8px}.app-header:has(#connections-button:not([hidden])) .header-actions{flex-basis:100%;margin-left:0;justify-content:space-between}.app-header:has(#connections-button:not([hidden]))~.workspace{height:calc(100dvh - 96px)}}

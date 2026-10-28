@@ -162,7 +162,7 @@ def inspect_database(path, runtime, expected):
     # The app holds an exclusive SQLite lock; callers inspect only after its process exits.
     check(path.is_file(), "Hosted mode did not create the promised SQLite database.")
     with closing(sqlite3.connect(path)) as connection:
-        check(connection.execute("PRAGMA user_version").fetchone()[0] == 2, "Unexpected work schema version.")
+        check(connection.execute("PRAGMA user_version").fetchone()[0] == 3, "Unexpected work schema version.")
         tables = connection.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
         schemas = dict(tables)
         check(set(schemas) == {"current_work", "encrypted_connections"}, "Storage contains an unexpected document/history table.")

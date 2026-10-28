@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AppError,
-    workspace::{Document, VerifiedIdentity, Work},
+    workspace::{Document, SourceMetadata, VerifiedIdentity, Work},
 };
 
 pub(crate) struct Storage {
@@ -91,7 +91,7 @@ impl Storage {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|_| unavailable())?;
-        if version > 2 {
+        if version > 3 {
             return Err(AppError::bad_request(
                 "La base usa un esquema más reciente; utiliza una versión compatible de mddiff.",
             ));
@@ -143,6 +143,17 @@ impl Storage {
                     CHECK (ciphertext IS NULL OR length(ciphertext) BETWEEN 16 AND 65552)
                 ) WITHOUT ROWID;
                 PRAGMA user_version=2;",
+                )
+                .map_err(|_| unavailable())?;
+            transaction.commit().map_err(|_| unavailable())?;
+        }
+        if version < 3 {
+            let transaction = connection.transaction().map_err(|_| unavailable())?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE current_work ADD COLUMN base_source TEXT
+                    CHECK (base_label IS NOT NULL OR base_source IS NULL);
+                 PRAGMA user_version=3;",
                 )
                 .map_err(|_| unavailable())?;
             transaction.commit().map_err(|_| unavailable())?;
@@ -260,7 +271,7 @@ impl Storage {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         connection
             .query_row(
-                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown
+                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source
             FROM current_work WHERE issuer=?1 AND subject=?2",
                 params![owner.issuer, owner.subject],
                 |row| {
@@ -270,6 +281,9 @@ impl Storage {
                     if revision <= 0 {
                         return Err(rusqlite::Error::IntegralValueOutOfRange(0, revision));
                     }
+                    let base_source: Option<String> = row.get(5)?;
+                    let base_source = base_source.map(|source| serde_json::from_str::<SourceMetadata>(&source)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?;
                     Ok(Work {
                         revision: revision as u64,
                         base: match base_label {
@@ -286,6 +300,7 @@ impl Storage {
                             }),
                             None => None,
                         },
+                        base_source,
                     })
                 },
             )
@@ -298,8 +313,8 @@ impl Storage {
         &self,
         owner: &VerifiedIdentity,
         expected: u64,
-        base: Option<&Document>,
-        candidate: Option<&Document>,
+        work: &Work,
+        connection_generation: Option<u64>,
     ) -> Result<u64, AppError> {
         let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection
@@ -317,16 +332,46 @@ impl Storage {
         if u64::try_from(revision).ok() != Some(expected) {
             return Err(conflict());
         }
+        if let Some(expected_generation) = connection_generation {
+            let source = work.base_source.as_ref().ok_or_else(conflict)?;
+            let connection: Option<(i64, bool)> = transaction
+                .query_row(
+                    "SELECT generation,ciphertext IS NOT NULL FROM encrypted_connections
+                 WHERE issuer=?1 AND subject=?2 AND provider=?3 AND destination=?4",
+                    params![
+                        owner.issuer,
+                        owner.subject,
+                        source.provider.as_str(),
+                        source.destination
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| unavailable())?;
+            if !connection.is_some_and(|(generation, connected)| {
+                connected && u64::try_from(generation).ok() == Some(expected_generation)
+            }) {
+                return Err(crate::connections::connection_conflict());
+            }
+        }
         let next = revision
             .checked_add(1)
             .ok_or_else(|| AppError::bad_request("La revisión alcanzó el límite admitido."))?;
+        let source = work
+            .base_source
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| unavailable())?;
+        let base = work.base.as_ref();
+        let candidate = work.candidate.as_ref();
         transaction.execute("INSERT INTO current_work
-            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown)
-            VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(issuer,subject) DO UPDATE SET
+            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown,base_source)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(issuer,subject) DO UPDATE SET
             revision=excluded.revision,base_label=excluded.base_label,base_markdown=excluded.base_markdown,
-            candidate_label=excluded.candidate_label,candidate_markdown=excluded.candidate_markdown",
+            candidate_label=excluded.candidate_label,candidate_markdown=excluded.candidate_markdown,base_source=excluded.base_source",
             params![owner.issuer,owner.subject,next,base.map(|d| &d.label),base.map(|d| &d.markdown),
-                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown)]).map_err(|_| unavailable())?;
+                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source]).map_err(|_| unavailable())?;
         transaction.commit().map_err(|_| unavailable())?;
         Ok(next as u64)
     }

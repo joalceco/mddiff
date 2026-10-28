@@ -171,7 +171,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
-Avance al 2026-10-27: S02, S04, S05, [S06: agentes remotos](remote-agents.md) y [S07: conexiones personales](personal-connections.md) están implementados. Jira Cloud y Memos tienen configuración personal protegida y comprobaciones de lectura; abrir su contenido como original sigue en S08/S09. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
+Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
 
 ## Fuera de esta beta
 

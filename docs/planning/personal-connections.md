@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-27. Issue: [#8](https://github.com/joalceco/mddiff/issues/8). Rama: `feature/multiuser-sources`.
 
+Este documento registra S07. La entrega posterior [S08: captura de Memos](memos-source.md) permite abrir una nota como original con estas conexiones y añade el esquema SQLite 3 para su procedencia.
+
 ## Resultado y alcance
 
 Cada persona autenticada puede conectar, comprobar y desconectar sus propias cuentas desde **Conexiones**, junto a **Cerrar sesión**. Administración define los destinos disponibles; el usuario no introduce URLs. La conexión pertenece a la identidad verificada `issuer` + `sub`, igual que el trabajo actual.

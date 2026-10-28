@@ -19,6 +19,7 @@ El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están
 | Detalle de cambios | Fondo rojo o verde por bloque, signos `−` y `+`, y un highlight más intenso en las palabras modificadas. |
 | Vista de fuente | Markdown exacto, rangos de líneas y fragmentos de sintaxis modificados. |
 | Entradas alojadas | Pegar texto o subir `.md` desde las cabeceras; apertura y comparación automáticas. |
+| Original desde Memos | Capturar una nota por ID o URL con la conexión personal y conservar su procedencia. |
 | Integración | MCP/API local por rutas y MCP/API alojados con OAuth de usuario. |
 | Actualización de la vista | SSE avisa al navegador cuando otra solicitud abre un documento o una comparación. |
 | Navegación | Botones y atajos `J` / `K` para recorrer los cambios. |
@@ -116,7 +117,7 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos ya pueden configurarse; abrir su contenido como original pertenece a las próximas historias.
+Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y las notas de Memos ya pueden abrirse como original; la lectura de Jira sigue pendiente.
 
 Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
 
@@ -149,6 +150,12 @@ En modo local, abre documentos mediante sus rutas:
 El texto se abre tras una pausa de 350 ms; cerrar el campo permite guardar de inmediato. Los controles de otras entradas quedan deshabilitados mientras haya un cambio pendiente o en curso. Un pegado completo conserva los saltos recibidos del portapapeles; una edición o un pegado parcial puede normalizarlos a LF. Los archivos conservan Unicode, BOM, CRLF y ausencia de salto final, y rechazan UTF-8 inválido. El nombre base se usa como etiqueta; no se envía una ruta para abrirla en el servidor.
 
 Un conflicto `409` conserva el trabajo vigente y el borrador de texto visible. Copia lo que quieras conservar y cierra/reabre el campo antes de reintentar; un archivo debe seleccionarse de nuevo. Los eventos SSE no cambian automáticamente la revisión de un borrador pendiente. Consulta [la guía de entradas manuales](docs/planning/manual-imports.md) para errores, sesiones y fidelidad del contenido.
+
+### Abrir una nota de Memos como original
+
+En hosted, pulsa **Abrir Memos** en la cabecera de **Original**, elige una conexión personal conectada e introduce el ID o la URL de una nota de esa instancia. **Abrir** captura su Markdown exacto, conserva la propuesta actual y muestra su procedencia. La captura no se sincroniza automáticamente y no importa adjuntos.
+
+La integración soporta Memos 0.31.0 y requiere las conexiones de S07. Los fallos conservan el trabajo vigente; un conflicto obliga a revisar antes de reintentar. Consulta [las referencias admitidas, API, procedencia y pruebas](docs/planning/memos-source.md).
 
 Los atajos no se activan mientras escribes en un campo. El tema se cambia desde **Modo claro** / **Modo oscuro** y se conserva en el mismo navegador. Un error al abrir una ruta mantiene el último documento o comparación válidos.
 
@@ -429,6 +436,8 @@ GitHub Actions configura formato, análisis estático, pruebas Rust e integracio
 La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos y la evidencia local del 2026-10-27](docs/planning/remote-agents.md#reproducir-la-verificación); no se atribuye una corrida remota de CI.
 
 Las conexiones personales se verifican con `python3 scripts/test_connections.py` y proveedores sintéticos auditados; la pantalla tiene una prueba de contrato en `node tests/browser/connections.mjs`. La [guía de conexiones](docs/planning/personal-connections.md#reproducir-las-pruebas) describe requisitos y límites. No se ha validado el consentimiento con cuentas reales de Jira/Memos.
+
+La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sintéticas y `node tests/browser/memos.mjs` para el contrato de pantalla. No consulta notas privadas reales. La persistencia incorpora esquema 3 para la procedencia; consulta [la guía de captura](docs/planning/memos-source.md).
 
 ### Pruebas de importación en navegador
 
