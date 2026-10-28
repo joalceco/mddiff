@@ -222,4 +222,6 @@ La construcción y la suite Docker completa terminaron con código `0` en Linux 
 
 También pasaron las 56 pruebas Rust y Clippy. Estas comprobaciones del código se ejecutaron por separado; no añaden Rust como requisito del host para reproducir la suite Docker.
 
-GitHub Actions incorpora construcción de imagen e integración del contenedor; su corrida remota sigue pendiente. No se validaron amd64, un IdP real con HTTPS, el cluster, el despliegue público o la carga de diez usuarios. El IdP y los proveedores de esta suite son sintéticos. S13 cubre límites y capacidad; S14, publicación y recuperación operativa.
+GitHub Actions aprobó los jobs `check` y `container` en Linux amd64 para el código de empaquetado `c4c9382`: [corrida de CI](https://github.com/joalceco/mddiff/actions/runs/40741776582). Incluye las regresiones locales/alojadas, controles de navegador y construcción e integración del contenedor.
+
+No se validaron un IdP real con HTTPS, el cluster, el despliegue público o la carga de diez usuarios. El IdP y los proveedores de esta suite son sintéticos. S13 cubre límites y capacidad; S14, publicación y recuperación operativa.
