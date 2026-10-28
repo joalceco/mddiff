@@ -8,7 +8,7 @@ mddiff es una herramienta local para revisar documentos y propuestas de una IA. 
 
 El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado en desarrollo autentica sesiones web mediante Keycloak; todavía no es una beta pública.
 
-**Ir a:** [Inicio rápido](#inicio-rápido) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
+**Ir a:** [Inicio rápido](#inicio-rápido) · [Contenedor](#ejecutar-hosted-en-un-contenedor) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
 ## Qué incluye
 
@@ -87,12 +87,13 @@ La interfaz está incorporada en el binario. No necesitas copiar `web/` para eje
 ### Opciones de línea de comandos
 
 ```text
-mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]
+mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]
 ```
 
 | Argumento | Valor predeterminado | Descripción |
 | --- | --- | --- |
 | `--mode local\|hosted` | `local` | Selecciona el lector local o el modo alojado con espacios privados. |
+| `--bind IPV4` | `127.0.0.1` | Dirección del listener HTTP. Fuera de `127.0.0.1` requiere hosted con OIDC y una IPv4 privada o `0.0.0.0`; local conserva `127.0.0.1`. |
 | `--root CARPETA` | `.` | Carpeta existente cuyos Markdown puede abrir el modo local. No se acepta en hosted. |
 | `--port PUERTO` | `3847` | Puerto HTTP. `0` solicita uno libre; la terminal muestra la URL asignada. |
 | `--oidc-config ARCHIVO` | Sin configuración | JSON privado del proveedor Keycloak; solo se acepta en hosted. |
@@ -117,9 +118,17 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, estado, trabajo y eventos siguen rechazando el acceso con `401`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y las notas de Memos ya pueden abrirse como original; la lectura de Jira sigue pendiente.
+Sin configuración OIDC, hosted solo puede arrancar cerrado en `127.0.0.1`: estado, trabajo y eventos rechazan el acceso con `401`, y salud devuelve `503`. Otra dirección exige OIDC configurado y debe ser una IPv4 privada o `0.0.0.0`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y las notas de Memos ya pueden abrirse como original; la lectura de Jira sigue pendiente.
 
-Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub siguen pendientes y el proceso permanece limitado a loopback. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
+Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub y la publicación de la beta siguen pendientes. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
+
+### Ejecutar hosted en un contenedor
+
+El repositorio incluye un Dockerfile con bases fijadas por digest y Compose para **una instancia**. El proceso usa UID/GID `10001:10001`, sistema raíz de solo lectura y volumen privado en `/var/lib/mddiff`. Los JSON OIDC/conexiones y la clave binaria de 32 bytes se montan desde archivos externos privados; no se incorporan a la imagen ni se pasan como secretos de entorno. Las plantillas públicas permanecen en `deploy/examples/*.example`.
+
+`deploy/compose.yaml` no publica puertos del host. Para un proxy en el host, `deploy/compose.loopback.yaml` publica solo `127.0.0.1:3847`; el proxy termina HTTPS y conserva el origen canónico. `GET` y `HEAD /healthz` permiten comprobar preparación sin documentos ni credenciales. Salud no comprueba continuamente la disponibilidad del IdP.
+
+Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). Esta entrega no configura DNS, router, certificados o cluster, ni demuestra todavía capacidad de diez usuarios o un despliegue público.
 
 ## Usar el visor
 
@@ -340,11 +349,11 @@ La interfaz se sirve desde el propio binario, usa fuentes del sistema y bloquea 
 
 ### Acceso al servidor
 
-El servidor escucha en `127.0.0.1`, comprueba `Host` y `Origin`, rechaza solicitudes entre sitios y aplica una política CSP restrictiva. El HTML renderizado se sanea con `ammonia`, incluido el HTML que contiene highlights. La fuente se inserta como texto.
+El servidor local escucha en loopback, comprueba `Host` y `Origin`, rechaza solicitudes entre sitios y aplica una política CSP restrictiva. El HTML renderizado se sanea con `ammonia`, incluido el HTML que contiene highlights. La fuente se inserta como texto.
 
 **El modo local es una herramienta de un solo usuario.** No incluye autenticación ni aislamiento entre usuarios del mismo equipo. Un proceso local con acceso al puerto puede leer el estado o solicitar otros Markdown dentro de la raíz autorizada. No lo expongas mediante un proxy público o un túnel remoto.
 
-El modo hosted incorpora autenticación y separación de propietarios, pero todavía no configura TLS ni un listener público. Su sesión exige admisión en Keycloak; las mutaciones por cookie requieren Origin exacto y un token CSRF asociado a la sesión. La excepción HTTP de pruebas solo se admite con `allow_insecure_loopback: true` y ambos orígenes en loopback. El despliegue del cluster se desarrolla por separado.
+El modo hosted incorpora autenticación, separación de propietarios y un bind explícito para redes de contenedor detrás de HTTPS; TLS lo termina el proxy. Su sesión exige admisión en Keycloak; las mutaciones por cookie requieren Origin exacto y un token CSRF asociado a la sesión. La excepción HTTP de pruebas solo se admite con `allow_insecure_loopback: true` y ambos orígenes en loopback. El [paquete de contenedor](docs/planning/container-deployment.md) prepara esa ejecución; la publicación y operación del cluster siguen pendientes.
 
 ### Qué se publica en este repositorio
 
@@ -438,6 +447,8 @@ La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts
 Las conexiones personales se verifican con `python3 scripts/test_connections.py` y proveedores sintéticos auditados; la pantalla tiene una prueba de contrato en `node tests/browser/connections.mjs`. La [guía de conexiones](docs/planning/personal-connections.md#reproducir-las-pruebas) describe requisitos y límites. No se ha validado el consentimiento con cuentas reales de Jira/Memos.
 
 La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sintéticas y `node tests/browser/memos.mjs` para el contrato de pantalla. No consulta notas privadas reales. La persistencia incorpora esquema 3 para la procedencia; consulta [la guía de captura](docs/planning/memos-source.md).
+
+El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. Consulta [el procedimiento y el estado de su evidencia](docs/planning/container-deployment.md#verificar-el-empaquetado); su existencia no demuestra publicación o capacidad de diez usuarios.
 
 ### Pruebas de importación en navegador
 

@@ -4,6 +4,8 @@ Fecha: 2026-10-27. Issue: [#4](https://github.com/joalceco/mddiff/issues/4). Ram
 
 Este documento registra la entrega S03. S04 incorpora persistencia y exige también `--data-dir`; consulta [el trabajo actual y su borrado](current-work.md) para el contrato vigente. [S06: agentes remotos](remote-agents.md) incorpora Bearer y MCP alojado sobre esta autenticación. Las sesiones OIDC siguen en memoria.
 
+Las referencias a loopback y capacidades pendientes describen el estado de S03. [S12: contenedor alojado](container-deployment.md) añade bind explícito con OIDC detrás de un proxy HTTPS, sin completar el despliegue público ni Google/GitHub.
+
 ## Resultado y alcance
 
 La aplicación principal incorpora un adaptador OIDC para autenticar sesiones web contra Keycloak. Después de verificar la sesión y la admisión, el servidor obtiene el espacio privado asociado al par estable `issuer` + `sub`. El nombre visible y el email no deciden la propiedad del espacio.

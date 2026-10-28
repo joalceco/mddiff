@@ -4,6 +4,8 @@ Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Ram
 
 Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. [S08: captura de Memos](memos-source.md) añade procedencia en el esquema 3.
 
+[S12: contenedor alojado](container-deployment.md) amplía la operación mediante un bind explícito con OIDC, volumen y secretos externos. Las referencias al listener limitado a loopback corresponden a la entrega S04; los límites de borrado y retención siguen vigentes.
+
 ## Resultado y alcance
 
 El modo hosted conserva en SQLite el último original y su propuesta para cada identidad verificada. El trabajo sobrevive al cierre del navegador y al reinicio del proceso. Sustituirlo reemplaza el contenido vigente; no crea una biblioteca ni versiones recuperables.

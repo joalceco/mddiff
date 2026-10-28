@@ -21,7 +21,10 @@ use mddiff::{
 };
 use rmcp::schemars;
 use serde::Deserialize;
-use std::{convert::Infallible, env, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible, env, ffi::OsString, net::Ipv4Addr, path::PathBuf, sync::Arc,
+    time::Duration,
+};
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const CONTENT_BODY_LIMIT: usize = 24 * 1024 * 1024 + 16 * 1024;
 
@@ -124,7 +127,12 @@ async fn security(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let validation = if let Some(auth) = &app.auth {
+    let loopback_health = matches!(app.mode, Mode::Hosted(_))
+        && is_health_request(request.method(), request.uri().path())
+        && validate_request(request.method(), request.headers(), app.port).is_ok();
+    let validation = if loopback_health {
+        Ok(())
+    } else if let Some(auth) = &app.auth {
         auth.validate_boundary(request.method(), request.uri().path(), request.headers())
     } else {
         validate_request(request.method(), request.headers(), app.port)
@@ -148,6 +156,19 @@ async fn security(
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+fn is_health_request(method: &Method, path: &str) -> bool {
+    path == "/healthz" && matches!(*method, Method::GET | Method::HEAD)
+}
+
+async fn health(State(app): State<Arc<App>>) -> StatusCode {
+    match (&app.mode, &app.auth) {
+        (Mode::Hosted(store), Some(_)) if store.check_storage().await.is_ok() => {
+            StatusCode::NO_CONTENT
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 #[derive(Deserialize)]
@@ -353,7 +374,7 @@ fn router(app: Arc<App>) -> Router {
             .route("/api/open", post(open_document))
             .route("/api/compare", post(compare_documents))
             .route_service("/mcp", mcp::service(Arc::clone(reader), app.port)),
-        Mode::Hosted(_) => router.route(
+        Mode::Hosted(_) => router.route("/healthz", get(health)).route(
             "/api/work",
             get(get_work)
                 .put(replace_work)
@@ -392,6 +413,7 @@ struct Arguments {
     oidc_config: Option<PathBuf>,
     connections_config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    bind: Ipv4Addr,
     port: u16,
     documents: Vec<PathBuf>,
 }
@@ -406,6 +428,7 @@ fn parse_arguments(
         oidc_config: None,
         connections_config: None,
         data_dir: None,
+        bind: Ipv4Addr::LOCALHOST,
         port: 3847,
         documents: Vec::new(),
     };
@@ -460,6 +483,15 @@ fn parse_arguments(
                     .and_then(|value| value.parse().ok())
                     .ok_or("Puerto inválido.")?;
             }
+            Some("--bind") => {
+                let bind = arguments
+                    .next()
+                    .ok_or("Falta la dirección después de --bind.")?;
+                options.bind = bind
+                    .to_str()
+                    .and_then(|value| value.parse().ok())
+                    .ok_or("Usa una dirección IPv4 válida después de --bind.")?;
+            }
             Some(value) if value.starts_with('-') => {
                 return Err(format!("Opción desconocida: {value}"));
             }
@@ -487,7 +519,28 @@ fn parse_arguments(
     if !matches!(options.documents.len(), 0 | 2) {
         return Err("Indica dos archivos para comparar, o ninguno para abrir el lector.".into());
     }
+    if options.bind != Ipv4Addr::LOCALHOST
+        && (options.mode != CliMode::Hosted
+            || options.oidc_config.is_none()
+            || !(options.bind.is_unspecified() || options.bind.is_private()))
+    {
+        return Err("Escuchar fuera de 127.0.0.1 requiere modo hosted, --oidc-config y una IPv4 privada o 0.0.0.0.".into());
+    }
     Ok(Some(options))
+}
+
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 #[tokio::main]
@@ -495,7 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
         );
         return Ok(());
     };
@@ -513,8 +566,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             arguments.data_dir.as_deref().unwrap(),
         )?),
     };
-    let listener =
-        tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
+    let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();
     let connections = match (&arguments.connections_config, &mode, &auth) {
         (Some(path), Mode::Hosted(workspaces), Some(auth)) => {
@@ -540,7 +592,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .map_err(|error| std::io::Error::other(error.1))?;
     }
-    println!("MDdiff: http://127.0.0.1:{port}");
+    if arguments.bind == Ipv4Addr::LOCALHOST {
+        println!("MDdiff: http://127.0.0.1:{port}");
+    } else {
+        println!("MDdiff: {}", app.auth.as_ref().unwrap().public_origin());
+        println!("Escucha: {}:{port}", arguments.bind);
+    }
     match &app.mode {
         Mode::Local(reader) => println!("Carpeta autorizada: {}", reader.root().display()),
         Mode::Hosted(_) => {
@@ -557,7 +614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open SSE streams must not block shutdown; SQLite recovers incomplete transactions.
     tokio::select! {
         result = async { axum::serve(listener, router(app)).await } => result?,
-        result = tokio::signal::ctrl_c() => result?,
+        result = shutdown_signal() => result?,
     }
     Ok(())
 }
@@ -707,6 +764,115 @@ mod tests {
         headers.remove("sec-fetch-site");
         headers.insert(header::HOST, HeaderValue::from_static("evil.example:3847"));
         assert!(validate_request(&Method::GET, &headers, 3847).is_err());
+    }
+
+    #[test]
+    fn binding_is_loopback_by_default_and_network_binding_requires_hosted_oidc() {
+        assert_eq!(
+            parse_arguments([]).unwrap().unwrap().bind,
+            Ipv4Addr::LOCALHOST
+        );
+        for bind in ["0.0.0.0", "10.2.3.4", "172.16.1.2", "192.168.1.2"] {
+            let options = parse_arguments(
+                [
+                    "--bind",
+                    bind,
+                    "--mode",
+                    "hosted",
+                    "--data-dir",
+                    "private-data",
+                    "--oidc-config",
+                    "private.json",
+                ]
+                .map(OsString::from),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(options.bind, bind.parse::<Ipv4Addr>().unwrap());
+            assert!(parse_arguments(["--bind", bind].map(OsString::from)).is_err());
+            assert!(
+                parse_arguments(
+                    [
+                        "--bind",
+                        bind,
+                        "--mode",
+                        "hosted",
+                        "--data-dir",
+                        "private-data"
+                    ]
+                    .map(OsString::from)
+                )
+                .is_err()
+            );
+        }
+        for bind in [
+            "8.8.8.8",
+            "169.254.169.254",
+            "224.0.0.1",
+            "255.255.255.255",
+            "127.0.0.2",
+            "::1",
+            "localhost",
+            "invalid",
+        ] {
+            assert!(
+                parse_arguments(
+                    [
+                        "--bind",
+                        bind,
+                        "--mode",
+                        "hosted",
+                        "--data-dir",
+                        "private-data",
+                        "--oidc-config",
+                        "private.json"
+                    ]
+                    .map(OsString::from)
+                )
+                .is_err(),
+                "{bind}"
+            );
+        }
+        assert!(parse_arguments(["--bind"].map(OsString::from)).is_err());
+    }
+
+    #[tokio::test]
+    async fn health_is_unavailable_without_oidc_and_not_registered_in_local_mode() {
+        let reader = LocalReader::new(std::env::current_dir().unwrap()).unwrap();
+        for (mode, expected) in [
+            (Mode::Local(Arc::new(reader)), StatusCode::NOT_FOUND),
+            (
+                Mode::Hosted(Workspaces::default()),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let app = Arc::new(App {
+                port: 3847,
+                mode,
+                auth: None,
+                connections: None,
+            });
+            for method in [Method::GET, Method::HEAD] {
+                let response = router(Arc::clone(&app))
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri("/healthz")
+                            .header(header::HOST, "127.0.0.1:3847")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+                assert!(
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]

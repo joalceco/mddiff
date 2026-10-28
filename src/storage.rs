@@ -42,6 +42,14 @@ pub(crate) fn conflict() -> AppError {
 }
 
 impl Storage {
+    pub(crate) fn check_health(&self) -> Result<(), AppError> {
+        self.connection
+            .lock()
+            .map_err(|_| unavailable())?
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|_| unavailable())
+    }
+
     #[cfg(test)]
     pub(crate) fn read_only_for_test(&self, value: bool) {
         self.connection

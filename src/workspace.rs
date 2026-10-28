@@ -77,6 +77,24 @@ pub struct Workspaces {
 }
 
 impl Workspaces {
+    /// Checks the opened SQLite handle with SELECT 1; does not inspect work or test writes.
+    pub async fn check_storage(&self) -> Result<(), AppError> {
+        let storage = self.storage.clone().ok_or_else(|| {
+            AppError(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "El almacenamiento persistente no está disponible.".into(),
+            )
+        })?;
+        tokio::task::spawn_blocking(move || storage.check_health())
+            .await
+            .map_err(|_| {
+                AppError(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "El almacenamiento persistente no está disponible.".into(),
+                )
+            })?
+    }
+
     pub fn connection_store(
         &self,
         key_path: &std::path::Path,
@@ -431,6 +449,29 @@ mod tests {
                 }),
             )
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_checks_sqlite_without_requiring_writes_or_creating_work() {
+        let directory = Database::new();
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        store.storage.as_ref().unwrap().read_only_for_test(true);
+        store.check_storage().await.unwrap();
+        assert_eq!(
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .database_for_test()
+                .query_row("SELECT count(*) FROM current_work", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            Workspaces::default().check_storage().await.unwrap_err().0,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]

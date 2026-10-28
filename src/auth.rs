@@ -592,10 +592,12 @@ pub async fn authenticate(
         return next.run(request).await;
     };
     let path = request.uri().path().to_owned();
-    if matches!(
-        path.as_str(),
-        "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp"
-    ) {
+    if crate::is_health_request(request.method(), &path)
+        || matches!(
+            path.as_str(),
+            "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp"
+        )
+    {
         return next.run(request).await;
     }
     if request.headers().contains_key(header::AUTHORIZATION) {
@@ -1177,6 +1179,134 @@ mod tests {
         auth.sessions.lock().await.insert(handle.0.clone(), expired);
         assert!(auth.local_session(&handle).await.is_err());
         assert!(auth.sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn public_health_uses_only_approved_hosts_and_never_authorizes_private_routes() {
+        use axum::body::{Body, to_bytes};
+        use mddiff::workspace::Workspaces;
+        use tower::ServiceExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "mddiff-health-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app = Arc::new(App {
+            port: 3847,
+            mode: crate::Mode::Hosted(Workspaces::persistent(&directory).unwrap()),
+            auth: Some(Arc::new(authenticator(config()))),
+            connections: None,
+        });
+        for method in [Method::GET, Method::HEAD] {
+            for (host, origin) in [
+                ("127.0.0.1:3847", None),
+                ("localhost:3847", None),
+                ("viewer.example", None),
+                ("127.0.0.1:3847", Some("http://127.0.0.1:3847")),
+                ("viewer.example", Some("https://viewer.example")),
+            ] {
+                let mut request = Request::builder()
+                    .method(method.clone())
+                    .uri("/healthz")
+                    .header(header::HOST, host);
+                if let Some(origin) = origin {
+                    request = request.header(header::ORIGIN, origin);
+                }
+                let response = crate::router(Arc::clone(&app))
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NO_CONTENT, "{method} {host}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert!(
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+        for (path, host, origin, expected) in [
+            ("/healthz", "evil.example", None, StatusCode::FORBIDDEN),
+            ("/healthz", "127.0.0.1:3848", None, StatusCode::FORBIDDEN),
+            (
+                "/healthz",
+                "127.0.0.1:3847",
+                Some("https://evil.example"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/healthz",
+                "viewer.example",
+                Some("http://127.0.0.1:3847"),
+                StatusCode::FORBIDDEN,
+            ),
+            ("/api/work", "127.0.0.1:3847", None, StatusCode::FORBIDDEN),
+            (
+                "/api/work",
+                "viewer.example",
+                None,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "/api/events",
+                "viewer.example",
+                None,
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .uri(path)
+                .header(header::HOST, host)
+                .header("x-forwarded-host", "viewer.example")
+                .header("x-forwarded-proto", "https")
+                .header("forwarded", "for=127.0.0.1;host=viewer.example;proto=https")
+                .header("x-user-id", "alice");
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            let response = crate::router(Arc::clone(&app))
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path} {host}");
+        }
+        let response = crate::router(Arc::clone(&app))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/healthz")
+                    .header(header::HOST, "viewer.example")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let missing_storage = Arc::new(App {
+            port: 3847,
+            mode: crate::Mode::Hosted(Workspaces::default()),
+            auth: Some(Arc::new(authenticator(config()))),
+            connections: None,
+        });
+        let response = crate::router(missing_storage)
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(header::HOST, "127.0.0.1:3847")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(app);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

@@ -52,3 +52,21 @@ jobs:
       - name: Remove synthetic Keycloak
         if: always()
         run: python3 spikes/identity/keycloak.py down
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate private Compose configuration
+        run: |
+          docker compose -f deploy/compose.yaml config --quiet
+          docker compose -f deploy/compose.yaml -f deploy/compose.loopback.yaml config --quiet
+      - name: Build the Linux image
+        run: docker build --tag mddiff:ci .
+      - name: Start synthetic Keycloak
+        run: python3 spikes/identity/keycloak.py up
+      - name: Test isolated hosted container and persistent volumes
+        run: python3 scripts/test_container.py --image mddiff:ci
+      - name: Remove synthetic Keycloak
+        if: always()
+        run: python3 spikes/identity/keycloak.py down

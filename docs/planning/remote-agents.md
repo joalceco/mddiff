@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-27. Issue: [#7](https://github.com/joalceco/mddiff/issues/7). Rama: `feature/multiuser-sources`.
 
+Este documento registra S06 con listener de loopback. [S12: contenedor alojado](container-deployment.md) permite un bind explícito con OIDC dentro de una red de contenedor detrás de HTTPS; no cambia el contrato de identidad y autorización MCP.
+
 ## Resultado y alcance
 
 Un agente autenticado puede leer el trabajo actual de su usuario y enviar una propuesta al mismo espacio que muestra el navegador. MCP y la API usan la identidad verificada `issuer` + `sub`, los mismos controles de revisión y la misma persistencia que la interfaz web. El visor recibe la nueva revisión por SSE.

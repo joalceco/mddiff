@@ -2,7 +2,7 @@
 
 Fecha: 2026-10-27. Rama: `feature/multiuser-sources`.
 
-Estado: plan de producto y backlog; la aplicación publicada todavía funciona como lector local. Las decisiones de arquitectura siguientes son recomendaciones del comité. No constituyen una verificación de despliegue o de interoperabilidad.
+Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; la publicación permanece en S14.
 
 ## Resultado esperado
 
@@ -96,7 +96,7 @@ flowchart LR
 
 ### Estado e identidad
 
-El código actual mantiene snapshot, mutex y canal SSE globales. Estos tres elementos deben separarse por propietario. La identidad se obtiene de la sesión o token verificado; el cliente no puede seleccionar otro propietario mediante campos, rutas o identificadores.
+S02 separó snapshot, mutex y canal SSE por propietario; el modo local conserva su espacio único. La identidad se obtiene de la sesión o token verificado; el cliente no puede seleccionar otro propietario mediante campos, rutas o identificadores.
 
 Se propone una sola instancia de aplicación y SQLite en almacenamiento local persistente. No se colocará el archivo SQLite en un volumen de red compartido entre réplicas. Si aparece la necesidad de varias instancias, habrá que revisar persistencia, sesiones y distribución de eventos; no bastará con aumentar contenedores.
 
@@ -108,7 +108,7 @@ Las escrituras del trabajo serán atómicas y usarán una revisión esperada. Un
 
 El modo local conserva el uso actual de archivos dentro de `--root`, CLI y loopback. El modo alojado acepta contenido o referencias estructuradas de proveedor. No acepta rutas del sistema de archivos del servidor ni permite activar la lectura local desde una solicitud.
 
-El límite actual de 16 KiB sirve para JSON con rutas; debe revisarse para transportar contenido. La propuesta inicial mantiene 2 MiB por documento y establece un límite HTTP que contemple ambos documentos y el overhead real de JSON o multipart. Habrá límites por usuario y de procesamiento para evitar que una persona agote el servicio.
+Los JSON locales con rutas conservan el límite de 16 KiB. La API alojada admite 24 MiB + 16 KiB de transporte para dos documentos escapados en JSON, con 2 MiB por documento. La importación manual no utiliza multipart. S13 debe verificar límites y capacidad; el tamaño de petición no demuestra por sí solo que una persona no pueda agotar recursos.
 
 ### Conexiones personales y lectura
 
@@ -137,6 +137,8 @@ La retención de backups, registros transitorios y SQLite/WAL debe acordarse ant
 | Capacidad y recuperación | Carga de diez usuarios, memoria/latencia medidas, observabilidad sin contenido y restauración/rollback verificados. |
 
 El despliegue inicial se planifica sobre un contenedor de aplicación dentro del entorno Docker/LXC disponible. Se verificarán capacidad, ubicación, red, certificados y publicación antes del despliegue. Direcciones, hostnames, rutas privadas y credenciales de operación no forman parte de este documento público.
+
+[S12](container-deployment.md) prepara una imagen sin privilegios, datos persistentes y secretos externos, Compose sin puertos publicados por defecto, proxy HTTPS de ejemplo y salud sin contenido. No inicia un IdP de desarrollo ni cambia infraestructura. La construcción y la integración Docker completa pasaron el 2026-10-28 en Linux arm64 con usuarios y proveedores sintéticos; CI remoto sigue pendiente. S13 conserva las pruebas de capacidad y S14, el despliegue, respaldo y rollback.
 
 No se introduce Kubernetes, Redis o replicación para esta beta. El hecho de usar un túnel HTTPS no reemplaza la autorización de la aplicación ni la protección del endpoint MCP.
 
@@ -171,7 +173,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
-Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
+Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64, con CI remoto pendiente. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. El acceso público depende de cerrar las verificaciones y tareas operativas restantes.
 
 ## Fuera de esta beta
 
@@ -191,4 +193,4 @@ Integración: [autorización MCP](https://modelcontextprotocol.io/specification/
 
 ## Verificación de este plan
 
-Se revisaron los límites y puntos de entrada del código actual y se realizaron dos rondas de contraste entre tres agentes. No se desarrolló autenticación, persistencia, conectores ni despliegue. Las características de proveedores citadas deben verificarse de nuevo al fijar versiones y probar la integración real.
+El plan original se contrastó en dos rondas entre tres agentes mediante lectura de límites y puntos de entrada; ese ejercicio no implementó autenticación, persistencia, conectores o despliegue. Los avances posteriores se documentan en sus guías y pruebas, sin atribuirlos al comité. Las características de proveedores citadas deben verificarse de nuevo al fijar versiones y probar la integración real.
