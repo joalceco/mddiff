@@ -238,8 +238,16 @@ def main():
                     mutate(alice, provider, "jira-alpha", "", 0)
                     callback(alice, provider, path, "error")
                     check(destinations(alice, provider)["jira-alpha"]["revision"] == 1 and not destinations(alice, provider)["jira-alpha"]["connected"], "A late callback changed its disconnect tombstone.")
+                    provider.token_type = "Basic"
+                    callback(alice, provider, authorization(alice, provider, 1), "error")
+                    check(not destinations(alice, provider)["jira-alpha"]["connected"]
+                          and destinations(alice, provider)["jira-alpha"]["revision"] == 1,
+                          "Jira accepted an explicitly unsupported OAuth token type.")
+                    provider.token_type = None
                     callback(alice, provider, authorization(alice, provider, 1))
+                    provider.token_type = "Bearer"
                     callback(bob, provider, authorization(bob, provider, 0, user="bob"))
+                    provider.token_type = None
                     mutate(alice, provider, "jira-alpha", "check", 2)
                     check(provider.audit[-1]["user"] == "alice", "Alice's Jira check sent another owner's OAuth token.")
                     mutate(bob, provider, "jira-alpha", "check", 1)
@@ -249,7 +257,7 @@ def main():
                     provider.resources_override = None
                     check(code in (400, 502), "Jira accepted a cloud ID paired with another destination URL.")
 
-                    phase = "rotating refresh tokens and captured-work preservation"
+                    phase = "rotating refresh tokens without optional token_type and captured-work preservation"
                     mutate(alice, provider, "jira-alpha", "", 2)
                     provider.token_lifespan = 1
                     callback(alice, provider, authorization(alice, provider, 3))

@@ -25,6 +25,7 @@ class Providers:
         self.revoked = set()
         self.resources_override = None
         self.token_lifespan = 3600
+        self.token_type = None
         self.redirect = False
         self.oversized = False
         self.lock = threading.RLock()
@@ -51,8 +52,11 @@ class Providers:
         self.access[access] = user
         self.refresh[refresh] = user
         self.secrets.update((access, refresh))
-        return {"access_token": access, "refresh_token": refresh, "expires_in": self.token_lifespan,
-                "token_type": "Bearer", "scope": "read:jira-work offline_access"}
+        result = {"access_token": access, "refresh_token": refresh, "expires_in": self.token_lifespan,
+                  "scope": "read:jira-work offline_access"}
+        if self.token_type is not None:
+            result["token_type"] = self.token_type
+        return result
 
     def record(self, method, path, user=None, fields=(), grant=None):
         self.audit.append({"method": method, "path": path, "user": user,

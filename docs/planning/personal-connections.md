@@ -86,6 +86,8 @@ La comprobación consulta `GET https://api.atlassian.com/oauth/token/accessible-
 
 Los refresh tokens rotativos se cifran y guardan antes de continuar con otras solicitudes. La renovación se serializa por usuario y destino; desconectar puede invalidar una comprobación en curso. Cortar la conexión HTTP del cliente no cancela una renovación ya iniciada.
 
+Las respuestas de intercambio y renovación admiten que `token_type` esté ausente, como muestran los ejemplos de Atlassian. Si aparece, debe ser una cadena `Bearer`; un tipo distinto o inválido se rechaza. Este comportamiento no amplía los scopes ni los sitios permitidos.
+
 La [guía oficial de Jira 3LO](https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/), consultada el 2026-10-29, describe consentimiento, sitios accesibles, distribución y refresh tokens. Los scopes de la API se detallan en [scopes de Jira Cloud](https://developer.atlassian.com/cloud/jira/platform/scopes-for-oauth-2-3LO-and-forge-apps/).
 
 ## Token personal de Memos

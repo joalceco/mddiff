@@ -39,6 +39,14 @@ fn invalid() -> AppError {
 fn failed() -> AppError {
     AppError(StatusCode::BAD_GATEWAY, "No se pudo comprobar la conexión. Revisa el permiso, la versión y la disponibilidad del proveedor; vuelve a conectar si caducó o fue revocada.".into())
 }
+fn valid_jira_token_type(result: &Value) -> bool {
+    match result.get("token_type") {
+        None => true,
+        Some(Value::String(value)) => value.eq_ignore_ascii_case("Bearer"),
+        _ => false,
+    }
+}
+
 fn stale() -> AppError {
     AppError(
         StatusCode::CONFLICT,
@@ -919,10 +927,8 @@ impl Providers {
             .as_u64()
             .filter(|n| *n > 0 && *n <= 7 * 86400)
             .ok_or_else(failed)?;
-        if !result["token_type"]
-            .as_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("Bearer"))
-        {
+        // Atlassian documents token responses without token_type; explicit other types stay invalid.
+        if !valid_jira_token_type(&result) {
             return Err(failed());
         }
         if result["scope"].as_str().is_some_and(|s| {
@@ -1279,6 +1285,28 @@ mod tests {
             assert!(memo_resource(bad, &origin).is_err(), "{bad}");
         }
     }
+    #[test]
+    fn jira_token_type_accepts_vendor_omission_but_not_an_explicit_other_type() {
+        for value in [
+            json!({}),
+            json!({"token_type":"Bearer"}),
+            json!({"token_type":"bearer"}),
+        ] {
+            assert!(valid_jira_token_type(&value));
+        }
+        for token_type in [
+            Value::Null,
+            json!(7),
+            json!([]),
+            json!({}),
+            json!(""),
+            json!("Basic"),
+            json!("Bearer "),
+        ] {
+            assert!(!valid_jira_token_type(&json!({"token_type":token_type})));
+        }
+    }
+
     #[test]
     fn jira_references_are_keys_for_one_approved_site() {
         let site = Url::parse("https://team-alpha.atlassian.net/").unwrap();
