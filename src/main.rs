@@ -1,8 +1,9 @@
-mod diff;
+mod auth;
 mod mcp;
+mod providers;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
@@ -12,172 +13,65 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures_util::stream;
-use rmcp::schemars;
-use serde::{Deserialize, Serialize};
-use std::{
-    convert::Infallible,
-    env,
-    ffi::OsString,
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+use futures_util::{StreamExt, stream};
+use mddiff::{
+    AppError,
+    local::LocalReader,
+    workspace::{
+        Document, InputKind, ManualInput, RequestKind, Snapshot, VerifiedIdentity, Work, Workspace,
+        Workspaces,
+    },
 };
-use tokio::sync::{Mutex, RwLock, watch};
-
-const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
+use rmcp::schemars;
+use serde::Deserialize;
+use std::{
+    convert::Infallible, env, ffi::OsString, net::Ipv4Addr, path::PathBuf, sync::Arc,
+    time::Duration,
+};
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CONTENT_BODY_LIMIT: usize = 24 * 1024 * 1024 + 16 * 1024;
+pub(crate) type RequestCapacity = Arc<Vec<tokio::sync::OwnedSemaphorePermit>>;
 
-#[derive(Serialize)]
-struct Snapshot {
-    revision: u64,
-    base_path: Option<String>,
-    candidate_path: Option<String>,
-    comparison: Option<diff::Comparison>,
-    processing_ms: f64,
+enum Mode {
+    Local(Arc<LocalReader>),
+    Hosted(Workspaces),
 }
 
 struct App {
-    root: PathBuf,
     port: u16,
-    snapshot: RwLock<Arc<Snapshot>>,
-    updates: Mutex<()>,
-    revisions: watch::Sender<u64>,
+    mode: Mode,
+    auth: Option<Arc<auth::Authenticator>>,
+    connections: Option<Arc<providers::Providers>>,
 }
 
 impl App {
-    fn new(root: PathBuf, port: u16) -> Self {
-        let (revisions, _) = watch::channel(0);
-        Self {
-            root,
-            port,
-            snapshot: RwLock::new(Arc::new(Snapshot {
-                revision: 0,
-                base_path: None,
-                candidate_path: None,
-                comparison: None,
-                processing_ms: 0.0,
-            })),
-            updates: Mutex::new(()),
-            revisions,
+    fn local_reader(&self) -> Result<&Arc<LocalReader>, AppError> {
+        match &self.mode {
+            Mode::Local(reader) => Ok(reader),
+            Mode::Hosted(_) => Err(AppError(
+                StatusCode::NOT_FOUND,
+                "Las rutas locales no están disponibles en modo alojado.".into(),
+            )),
         }
     }
 
-    async fn open(
+    async fn workspace(
         &self,
-        base: PathBuf,
-        candidate: Option<PathBuf>,
-    ) -> Result<Arc<Snapshot>, AppError> {
-        // Serialize requests so an earlier, slower comparison cannot replace a later one.
-        let _update = self.updates.lock().await;
-        let started = Instant::now();
-        let root = self.root.clone();
-        let (base_path, candidate_path, comparison) = tokio::task::spawn_blocking(move || {
-            let (base_path, original) = read_document(&root, &base)?;
-            let (candidate_path, comparison) = if let Some(candidate) = candidate {
-                let (candidate_path, proposed) = read_document(&root, &candidate)?;
-                (Some(candidate_path), diff::compare(&original, &proposed))
-            } else {
-                (None, diff::compare(&original, &original))
-            };
-            Ok::<_, AppError>((base_path, candidate_path, comparison))
-        })
-        .await
-        .map_err(|_| AppError::internal("No se pudo procesar el documento."))??;
-
-        let revision = self.snapshot.read().await.revision + 1;
-        let snapshot = Arc::new(Snapshot {
-            revision,
-            base_path: Some(base_path),
-            candidate_path,
-            comparison: Some(comparison),
-            processing_ms: started.elapsed().as_secs_f64() * 1000.0,
-        });
-        *self.snapshot.write().await = Arc::clone(&snapshot);
-        self.revisions.send_replace(revision);
-        Ok(snapshot)
+        identity: Option<Extension<VerifiedIdentity>>,
+    ) -> Result<Arc<Workspace>, AppError> {
+        match &self.mode {
+            Mode::Local(reader) => Ok(reader.workspace()),
+            Mode::Hosted(store) => {
+                let Extension(identity) = identity.ok_or_else(|| {
+                    AppError(
+                        StatusCode::UNAUTHORIZED,
+                        "El modo alojado requiere una identidad autenticada.".into(),
+                    )
+                })?;
+                store.for_user(&identity).await
+            }
+        }
     }
-}
-
-#[derive(Debug)]
-struct AppError(StatusCode, String);
-
-impl AppError {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, message.into())
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self(StatusCode::INTERNAL_SERVER_ERROR, message.into())
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
-    }
-}
-
-fn read_document(root: &Path, requested: &Path) -> Result<(String, String), AppError> {
-    let path = root
-        .join(requested)
-        .canonicalize()
-        .map_err(|error| AppError::bad_request(format!("No se pudo abrir el archivo: {error}")))?;
-    if !path.starts_with(root) {
-        return Err(AppError::bad_request(
-            "El archivo debe estar dentro de la carpeta autorizada.",
-        ));
-    }
-    if !path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
-        })
-    {
-        return Err(AppError::bad_request(
-            "Selecciona un archivo .md o .markdown.",
-        ));
-    }
-    let metadata = path
-        .metadata()
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(AppError::bad_request(
-            "La ruta debe señalar un archivo normal.",
-        ));
-    }
-    if metadata.len() > MAX_DOCUMENT_BYTES {
-        return Err(AppError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Cada documento admite hasta 2 MiB.".into(),
-        ));
-    }
-    let file = File::open(&path).map_err(|error| AppError::bad_request(error.to_string()))?;
-    if !file
-        .metadata()
-        .map_err(|error| AppError::bad_request(error.to_string()))?
-        .is_file()
-    {
-        return Err(AppError::bad_request(
-            "La ruta debe señalar un archivo normal.",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_DOCUMENT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| AppError::bad_request(format!("No se pudo leer el archivo: {error}")))?;
-    if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
-        return Err(AppError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Cada documento admite hasta 2 MiB.".into(),
-        ));
-    }
-    let source = String::from_utf8(bytes)
-        .map_err(|_| AppError::bad_request("El documento debe usar codificación UTF-8."))?;
-    Ok((path.to_string_lossy().into_owned(), source))
 }
 
 fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(), AppError> {
@@ -208,7 +102,14 @@ fn validate_request(method: &Method, headers: &HeaderMap, port: u16) -> Result<(
             "Solicitud entre sitios no autorizada.".into(),
         ));
     }
-    if method == Method::POST {
+    require_json_body(method, headers)
+}
+
+fn require_json_body(method: &Method, headers: &HeaderMap) -> Result<(), AppError> {
+    if matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
         let content_type = headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
@@ -230,10 +131,25 @@ async fn security(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let mut response = match validate_request(request.method(), request.headers(), app.port) {
+    let loopback_health = matches!(app.mode, Mode::Hosted(_))
+        && is_health_request(request.method(), request.uri().path())
+        && validate_request(request.method(), request.headers(), app.port).is_ok();
+    let validation = if loopback_health {
+        Ok(())
+    } else if let Some(auth) = &app.auth {
+        auth.validate_boundary(request.method(), request.uri().path(), request.headers())
+    } else {
+        validate_request(request.method(), request.headers(), app.port)
+    };
+    let mut response = match validation {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     };
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -249,6 +165,61 @@ async fn security(
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+fn is_health_request(method: &Method, path: &str) -> bool {
+    path == "/healthz" && matches!(*method, Method::GET | Method::HEAD)
+}
+
+async fn health(State(app): State<Arc<App>>) -> StatusCode {
+    match (&app.mode, &app.auth) {
+        (Mode::Hosted(store), Some(_)) if store.check_storage().await.is_ok() => {
+            StatusCode::NO_CONTENT
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+async fn quotas(
+    State(app): State<Arc<App>>,
+    mut request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp")
+        || path.starts_with("/api/sources/")
+        || (path.starts_with("/api/connections/") && path.ends_with("/check"));
+    let permits = match (&app.mode, request.extensions().get::<VerifiedIdentity>()) {
+        (Mode::Hosted(store), Some(identity)) if protected_content => {
+            let kind = if path == "/api/events" {
+                RequestKind::Events
+            } else if path.starts_with("/api/sources/") || path.ends_with("/check") {
+                RequestKind::Source
+            } else {
+                RequestKind::Content
+            };
+            match store.request_permits(identity, kind).await {
+                Ok(permits) => permits,
+                Err(error) => {
+                    let mut response = error.into_response();
+                    response
+                        .headers_mut()
+                        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                    return response;
+                }
+            }
+        }
+        _ => return next.run(request).await,
+    };
+    let permits: RequestCapacity = Arc::new(permits);
+    request.extensions_mut().insert(Arc::clone(&permits));
+    let response = next.run(request).await;
+    response.map(|body| {
+        axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _keep_capacity = &permits;
+            chunk
+        }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -270,13 +241,121 @@ fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, AppErro
     payload.map(|Json(value)| value).map_err(|error| {
         AppError(
             error.status(),
-            format!("Solicitud JSON inválida: {}", error.body_text()),
+            "Solicitud JSON inválida. Revisa los campos y tipos requeridos.".into(),
         )
     })
 }
 
-async fn get_state(State(app): State<Arc<App>>) -> Json<Arc<Snapshot>> {
-    Json(Arc::clone(&*app.snapshot.read().await))
+async fn get_state(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    Ok(Json(app.workspace(identity).await?.snapshot().await))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceWork {
+    expected_revision: u64,
+    base: Document,
+    candidate: Option<Document>,
+    base_input: Option<ManualInput>,
+    candidate_input: Option<ManualInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearWork {
+    expected_revision: u64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposeRequest {
+    expected_revision: u64,
+    candidate: Document,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeWorkRequest {
+    expected_revision: u64,
+    candidate: Document,
+    candidate_input: Option<ManualInput>,
+}
+
+async fn propose_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    session: Option<Extension<auth::SessionHandle>>,
+    payload: Result<Json<ProposeWorkRequest>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let input = json_payload(payload)?;
+    if input.candidate_input.is_some() && session.is_none() {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "La procedencia de carga requiere una sesión web.".into(),
+        ));
+    }
+    let kind = input
+        .candidate_input
+        .map(InputKind::from)
+        .unwrap_or(if session.is_some() {
+            InputKind::Text
+        } else {
+            InputKind::Api
+        });
+    app.workspace(identity)
+        .await?
+        .propose_with_input_if_revision(input.expected_revision, input.candidate, kind)
+        .await
+        .map(Json)
+}
+
+async fn get_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+) -> Result<Json<Arc<Work>>, AppError> {
+    Ok(Json(app.workspace(identity).await?.work().await))
+}
+
+async fn replace_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    session: Option<Extension<auth::SessionHandle>>,
+    payload: Result<Json<ReplaceWork>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let request = json_payload(payload)?;
+    if (request.base_input.is_some() || request.candidate_input.is_some()) && session.is_none() {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "La procedencia de carga requiere una sesión web.".into(),
+        ));
+    }
+    app.workspace(identity)
+        .await?
+        .replace_with_inputs_if_revision(
+            request.expected_revision,
+            request.base,
+            request.candidate,
+            request.base_input.map(Into::into),
+            request.candidate_input.map(Into::into),
+        )
+        .await
+        .map(Json)
+}
+
+async fn clear_work(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    payload: Result<Json<ClearWork>, JsonRejection>,
+) -> Result<Json<Arc<Snapshot>>, AppError> {
+    let request = json_payload(payload)?;
+    app.workspace(identity)
+        .await?
+        .clear_if_revision(request.expected_revision)
+        .await
+        .map(Json)
 }
 
 async fn open_document(
@@ -284,7 +363,7 @@ async fn open_document(
     payload: Result<Json<OpenRequest>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let request = json_payload(payload)?;
-    app.open(request.path, None).await.map(Json)
+    app.local_reader()?.open(request.path, None).await.map(Json)
 }
 
 async fn compare_documents(
@@ -292,34 +371,79 @@ async fn compare_documents(
     payload: Result<Json<CompareRequest>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let request = json_payload(payload)?;
-    app.open(request.base_path, Some(request.candidate_path))
+    app.local_reader()?
+        .open(request.base_path, Some(request.candidate_path))
         .await
         .map(Json)
 }
 
-async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
+async fn events(
+    State(app): State<Arc<App>>,
+    identity: Option<Extension<VerifiedIdentity>>,
+    session: Option<Extension<auth::SessionHandle>>,
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = app.workspace(identity).await?;
+    let authorization = match (&app.auth, session) {
+        (Some(auth), Some(Extension(session))) => Some((Arc::clone(auth), session)),
+        (Some(_), None) => {
+            return Err(AppError(
+                StatusCode::UNAUTHORIZED,
+                "La sesión no es válida.".into(),
+            ));
+        }
+        (None, _) => None,
+    };
+    let marker = match &authorization {
+        Some((auth, handle)) => Some(auth.session_marker(handle).await?),
+        None => None,
+    };
     let events = stream::unfold(
-        (app.revisions.subscribe(), true),
-        |(mut receiver, first)| async move {
-            if !first && receiver.changed().await.is_err() {
+        (workspace.subscribe(), true, authorization, marker),
+        |(mut receiver, first, authorization, marker)| async move {
+            if !first {
+                loop {
+                    if let Some((auth, session)) = &authorization {
+                        tokio::select! {
+                            changed=receiver.changed()=>{if changed.is_err(){return None;}break;},
+                            _=tokio::time::sleep(Duration::from_secs(2))=>{
+                                if auth.revalidate(session).await.is_err(){return None;}
+                            }
+                        }
+                    } else {
+                        if receiver.changed().await.is_err() {
+                            return None;
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some((auth, session)) = &authorization
+                && auth.revalidate(session).await.is_err()
+            {
                 return None;
             }
             let revision = *receiver.borrow_and_update();
-            let event = Event::default()
+            let mut event = Event::default()
                 .event("revision")
                 .data(revision.to_string());
-            Some((Ok::<_, Infallible>(event), (receiver, false)))
+            if let Some(marker) = &marker {
+                event = event.id(marker.clone());
+            }
+            Some((
+                Ok::<_, Infallible>(event),
+                (receiver, false, authorization, marker),
+            ))
         },
     );
-    Sse::new(events).keep_alive(
+    Ok(Sse::new(events).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
 
 fn router(app: Arc<App>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
@@ -343,17 +467,53 @@ fn router(app: Arc<App>) -> Router {
             }),
         )
         .route("/api/state", get(get_state))
-        .route("/api/open", post(open_document))
-        .route("/api/compare", post(compare_documents))
-        .route("/api/events", get(events))
-        .route_service("/mcp", mcp::service(Arc::clone(&app)))
+        .route("/api/events", get(events));
+    let router = match &app.mode {
+        Mode::Local(reader) => router
+            .route("/api/open", post(open_document))
+            .route("/api/compare", post(compare_documents))
+            .route_service("/mcp", mcp::service(Arc::clone(reader), app.port)),
+        Mode::Hosted(_) => router.route("/healthz", get(health)).route(
+            "/api/work",
+            get(get_work)
+                .put(replace_work)
+                .patch(propose_work)
+                .delete(clear_work)
+                .layer(DefaultBodyLimit::max(CONTENT_BODY_LIMIT)),
+        ),
+    };
+    let router = if app.auth.is_some() {
+        router
+            .merge(auth::routes())
+            .merge(providers::routes())
+            .route("/mcp", axum::routing::any(mcp::hosted_service))
+            .layer(middleware::from_fn_with_state(Arc::clone(&app), quotas))
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&app),
+                auth::authenticate,
+            ))
+    } else {
+        router
+    };
+    router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), security))
         .with_state(app)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CliMode {
+    Local,
+    Hosted,
+}
+
 struct Arguments {
-    root: PathBuf,
+    mode: CliMode,
+    root: Option<PathBuf>,
+    oidc_config: Option<PathBuf>,
+    connections_config: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    bind: Ipv4Addr,
     port: u16,
     documents: Vec<PathBuf>,
 }
@@ -363,18 +523,56 @@ fn parse_arguments(
 ) -> Result<Option<Arguments>, String> {
     let mut arguments = arguments.into_iter();
     let mut options = Arguments {
-        root: PathBuf::from("."),
+        mode: CliMode::Local,
+        root: None,
+        oidc_config: None,
+        connections_config: None,
+        data_dir: None,
+        bind: Ipv4Addr::LOCALHOST,
         port: 3847,
         documents: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h") => return Ok(None),
+            Some("--mode") => {
+                options.mode = match arguments.next().as_deref().and_then(|s| s.to_str()) {
+                    Some("local") => CliMode::Local,
+                    Some("hosted") => CliMode::Hosted,
+                    _ => return Err("Usa --mode local o --mode hosted.".into()),
+                };
+            }
+            Some("--oidc-config") => {
+                options.oidc_config = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta el archivo después de --oidc-config.")?
+                        .into(),
+                );
+            }
+            Some("--data-dir") => {
+                options.data_dir = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta la carpeta después de --data-dir.")?
+                        .into(),
+                );
+            }
+            Some("--connections-config") => {
+                options.connections_config = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta el archivo después de --connections-config.")?
+                        .into(),
+                );
+            }
             Some("--root") => {
-                options.root = arguments
-                    .next()
-                    .ok_or("Falta la ruta después de --root.")?
-                    .into()
+                options.root = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta la ruta después de --root.")?
+                        .into(),
+                )
             }
             Some("--port") => {
                 let port = arguments
@@ -385,16 +583,64 @@ fn parse_arguments(
                     .and_then(|value| value.parse().ok())
                     .ok_or("Puerto inválido.")?;
             }
+            Some("--bind") => {
+                let bind = arguments
+                    .next()
+                    .ok_or("Falta la dirección después de --bind.")?;
+                options.bind = bind
+                    .to_str()
+                    .and_then(|value| value.parse().ok())
+                    .ok_or("Usa una dirección IPv4 válida después de --bind.")?;
+            }
             Some(value) if value.starts_with('-') => {
                 return Err(format!("Opción desconocida: {value}"));
             }
             _ => options.documents.push(argument.into()),
         }
     }
+    if options.mode == CliMode::Hosted && (options.root.is_some() || !options.documents.is_empty())
+    {
+        return Err("El modo alojado no admite --root ni rutas de archivos locales.".into());
+    }
+    if options.mode == CliMode::Local && options.oidc_config.is_some() {
+        return Err("--oidc-config solo está disponible en modo alojado.".into());
+    }
+    if options.connections_config.is_some()
+        && (options.mode != CliMode::Hosted || options.oidc_config.is_none())
+    {
+        return Err("--connections-config requiere modo hosted y --oidc-config.".into());
+    }
+    if (options.mode == CliMode::Hosted) != options.data_dir.is_some() {
+        return Err(
+            "El modo hosted requiere --data-dir CARPETA; el modo local no admite esa opción."
+                .into(),
+        );
+    }
     if !matches!(options.documents.len(), 0 | 2) {
         return Err("Indica dos archivos para comparar, o ninguno para abrir el lector.".into());
     }
+    if options.bind != Ipv4Addr::LOCALHOST
+        && (options.mode != CliMode::Hosted
+            || options.oidc_config.is_none()
+            || !(options.bind.is_unspecified() || options.bind.is_private()))
+    {
+        return Err("Escuchar fuera de 127.0.0.1 requiere modo hosted, --oidc-config y una IPv4 privada o 0.0.0.0.".into());
+    }
     Ok(Some(options))
+}
+
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 #[tokio::main]
@@ -402,31 +648,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--root CARPETA] [--port PUERTO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Puerto predeterminado: 3847."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
         );
         return Ok(());
     };
-    let root = arguments.root.canonicalize()?;
-    if !root.is_dir() {
-        return Err(std::io::Error::other("--root debe señalar una carpeta.").into());
-    }
-    let listener =
-        tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, arguments.port)).await?;
+    let auth = match &arguments.oidc_config {
+        Some(path) => Some(Arc::new(
+            auth::Authenticator::new(auth::Config::load(path)?).await?,
+        )),
+        None => None,
+    };
+    let mode = match arguments.mode {
+        CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
+            arguments.root.unwrap_or_else(|| PathBuf::from(".")),
+        )?)),
+        CliMode::Hosted => Mode::Hosted(Workspaces::persistent(
+            arguments.data_dir.as_deref().unwrap(),
+        )?),
+    };
+    let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let app = Arc::new(App::new(root, port));
+    let connections = match (&arguments.connections_config, &mode, &auth) {
+        (Some(path), Mode::Hosted(workspaces), Some(auth)) => {
+            let config = providers::Config::load(path)?;
+            let store = workspaces.connection_store(&config.key_file)?;
+            Some(Arc::new(providers::Providers::new(
+                config,
+                store,
+                auth.public_origin(),
+            )?))
+        }
+        _ => None,
+    };
+    let app = Arc::new(App {
+        mode,
+        port,
+        auth,
+        connections,
+    });
     if let [base, candidate] = arguments.documents.as_slice() {
-        app.open(base.clone(), Some(candidate.clone()))
+        app.local_reader()?
+            .open(base.clone(), Some(candidate.clone()))
             .await
             .map_err(|error| std::io::Error::other(error.1))?;
     }
-    println!(
-        "MDdiff: http://127.0.0.1:{port}\nCarpeta autorizada: {}",
-        app.root.display()
-    );
-    // The read-only server can stop immediately instead of waiting for open SSE streams.
+    if arguments.bind == Ipv4Addr::LOCALHOST {
+        println!("MDdiff: http://127.0.0.1:{port}");
+    } else {
+        println!("MDdiff: {}", app.auth.as_ref().unwrap().public_origin());
+        println!("Escucha: {}:{port}", arguments.bind);
+    }
+    match &app.mode {
+        Mode::Local(reader) => println!("Carpeta autorizada: {}", reader.root().display()),
+        Mode::Hosted(_) => {
+            println!(
+                "Modo alojado: {}",
+                if app.auth.is_some() {
+                    "autenticación OIDC habilitada."
+                } else {
+                    "acceso cerrado sin configuración OIDC."
+                }
+            )
+        }
+    }
+    // Open SSE streams must not block shutdown; SQLite recovers incomplete transactions.
     tokio::select! {
         result = async { axum::serve(listener, router(app)).await } => result?,
-        result = tokio::signal::ctrl_c() => result?,
+        result = shutdown_signal() => result?,
     }
     Ok(())
 }
@@ -434,65 +722,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use futures_util::StreamExt;
+    use mddiff::workspace::Document;
+    use tower::ServiceExt;
 
-    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path = env::temp_dir().join(format!(
-                "mddiff-{}-{}",
-                std::process::id(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
-        }
+    fn identity(subject: &str) -> VerifiedIdentity {
+        VerifiedIdentity::from_verified_claims("synthetic-issuer".into(), subject.into()).unwrap()
     }
 
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    fn request(path: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:3847")
+            .header("x-user-id", "bob")
+            .header(header::AUTHORIZATION, "Bearer fabricated")
+            .body(Body::empty())
+            .unwrap()
     }
 
-    #[test]
-    fn rejects_unsafe_files_and_accepts_markdown() {
-        let directory = TestDirectory::new();
-        let root = directory.0.join("authorized");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("valid.MD"), "# Hola\n").unwrap();
-        fs::write(directory.0.join("outside.md"), "secret").unwrap();
-        fs::write(root.join("script.html"), "<script>").unwrap();
-        fs::write(root.join("invalid.md"), [0xff]).unwrap();
-        fs::create_dir(root.join("directory.md")).unwrap();
-        let large = File::create(root.join("large.md")).unwrap();
-        large.set_len(MAX_DOCUMENT_BYTES + 1).unwrap();
-
-        assert_eq!(
-            read_document(&root, Path::new("valid.MD")).unwrap().1,
-            "# Hola\n"
-        );
-        for path in [
-            "../outside.md",
-            "script.html",
-            "invalid.md",
-            "directory.md",
-            "large.md",
-        ] {
-            assert!(
-                read_document(&root, Path::new(path)).is_err(),
-                "accepted {path}"
+    #[tokio::test]
+    async fn hosted_handlers_require_trusted_context_and_scope_state_and_events() {
+        let app = Arc::new(App {
+            port: 3847,
+            mode: Mode::Hosted(Workspaces::default()),
+            auth: None,
+            connections: None,
+        });
+        assert!(app.local_reader().is_err());
+        for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
+            assert_eq!(
+                router(Arc::clone(&app))
+                    .oneshot(request(path))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
             );
         }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(directory.0.join("outside.md"), root.join("escape.md"))
+        let alice = app
+            .workspace(Some(Extension(identity("alice"))))
+            .await
+            .unwrap();
+        let alice_router = router(Arc::clone(&app)).layer(Extension(identity("alice")));
+        let bob_router = router(Arc::clone(&app)).layer(Extension(identity("bob")));
+        let mut alice_events = alice_router
+            .clone()
+            .oneshot(request("/api/events"))
+            .await
+            .unwrap()
+            .into_body()
+            .into_data_stream();
+        let mut bob_events = bob_router
+            .clone()
+            .oneshot(request("/api/events"))
+            .await
+            .unwrap()
+            .into_body()
+            .into_data_stream();
+        for stream in [&mut alice_events, &mut bob_events] {
+            let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
                 .unwrap();
-            assert!(read_document(&root, Path::new("escape.md")).is_err());
+            assert!(
+                std::str::from_utf8(&first)
+                    .unwrap()
+                    .lines()
+                    .any(|l| l.strip_prefix("data:").is_some_and(|n| n.trim() == "0"))
+            );
+        }
+        alice
+            .replace_content(
+                Document {
+                    label: "alice.md".into(),
+                    markdown: "# Alice\n".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let changed = tokio::time::timeout(Duration::from_secs(1), alice_events.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&changed)
+                .unwrap()
+                .lines()
+                .any(|l| l.strip_prefix("data:").is_some_and(|n| n.trim() == "1"))
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), bob_events.next())
+                .await
+                .is_err()
+        );
+        for (router, expected_revision, expected_label) in
+            [(alice_router, 1, Some("alice.md")), (bob_router, 0, None)]
+        {
+            let response = router
+                .oneshot(request("/api/state?owner_id=bob"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let state: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(state["revision"], expected_revision);
+            assert_eq!(state["base_path"].as_str(), expected_label);
         }
     }
 
@@ -524,28 +866,113 @@ mod tests {
         assert!(validate_request(&Method::GET, &headers, 3847).is_err());
     }
 
-    #[tokio::test]
-    async fn failed_open_preserves_document_and_revision() {
-        let directory = TestDirectory::new();
-        fs::write(directory.0.join("base.md"), "# Original\n").unwrap();
-        fs::write(directory.0.join("candidate.md"), "# Propuesta\n").unwrap();
-        let app = App::new(directory.0.clone(), 3847);
-        let mut revisions = app.revisions.subscribe();
-        let opened = app.open("base.md".into(), None).await.unwrap();
-        assert_eq!(opened.revision, 1);
-        assert!(opened.candidate_path.is_none());
-        assert!(revisions.has_changed().unwrap());
-        assert_eq!(*revisions.borrow_and_update(), 1);
-        assert!(app.open("missing.md".into(), None).await.is_err());
-        assert!(Arc::ptr_eq(&opened, &*app.snapshot.read().await));
-        assert!(!revisions.has_changed().unwrap());
-        let compared = app
-            .open("base.md".into(), Some("candidate.md".into()))
-            .await
+    #[test]
+    fn binding_is_loopback_by_default_and_network_binding_requires_hosted_oidc() {
+        assert_eq!(
+            parse_arguments([]).unwrap().unwrap().bind,
+            Ipv4Addr::LOCALHOST
+        );
+        for bind in ["0.0.0.0", "10.2.3.4", "172.16.1.2", "192.168.1.2"] {
+            let options = parse_arguments(
+                [
+                    "--bind",
+                    bind,
+                    "--mode",
+                    "hosted",
+                    "--data-dir",
+                    "private-data",
+                    "--oidc-config",
+                    "private.json",
+                ]
+                .map(OsString::from),
+            )
+            .unwrap()
             .unwrap();
-        assert_eq!(compared.revision, 2);
-        assert!(compared.candidate_path.is_some());
-        assert_eq!(*revisions.borrow_and_update(), 2);
+            assert_eq!(options.bind, bind.parse::<Ipv4Addr>().unwrap());
+            assert!(parse_arguments(["--bind", bind].map(OsString::from)).is_err());
+            assert!(
+                parse_arguments(
+                    [
+                        "--bind",
+                        bind,
+                        "--mode",
+                        "hosted",
+                        "--data-dir",
+                        "private-data"
+                    ]
+                    .map(OsString::from)
+                )
+                .is_err()
+            );
+        }
+        for bind in [
+            "8.8.8.8",
+            "169.254.169.254",
+            "224.0.0.1",
+            "255.255.255.255",
+            "127.0.0.2",
+            "::1",
+            "localhost",
+            "invalid",
+        ] {
+            assert!(
+                parse_arguments(
+                    [
+                        "--bind",
+                        bind,
+                        "--mode",
+                        "hosted",
+                        "--data-dir",
+                        "private-data",
+                        "--oidc-config",
+                        "private.json"
+                    ]
+                    .map(OsString::from)
+                )
+                .is_err(),
+                "{bind}"
+            );
+        }
+        assert!(parse_arguments(["--bind"].map(OsString::from)).is_err());
+    }
+
+    #[tokio::test]
+    async fn health_is_unavailable_without_oidc_and_not_registered_in_local_mode() {
+        let reader = LocalReader::new(std::env::current_dir().unwrap()).unwrap();
+        for (mode, expected) in [
+            (Mode::Local(Arc::new(reader)), StatusCode::NOT_FOUND),
+            (
+                Mode::Hosted(Workspaces::default()),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let app = Arc::new(App {
+                port: 3847,
+                mode,
+                auth: None,
+                connections: None,
+            });
+            for method in [Method::GET, Method::HEAD] {
+                let response = router(Arc::clone(&app))
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri("/healthz")
+                            .header(header::HOST, "127.0.0.1:3847")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+                assert!(
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]
@@ -562,6 +989,21 @@ mod tests {
             vec!["--port"],
             vec!["--port", "invalid"],
             vec!["--root"],
+            vec!["--oidc-config"],
+            vec!["--connections-config"],
+            vec!["--connections-config", "private.json"],
+            vec![
+                "--mode",
+                "hosted",
+                "--data-dir",
+                "private-data",
+                "--connections-config",
+                "private.json",
+            ],
+            vec!["--data-dir"],
+            vec!["--mode", "hosted"],
+            vec!["--mode", "local", "--data-dir", "private-data"],
+            vec!["--mode", "local", "--oidc-config", "private.json"],
             vec!["--unknown"],
         ] {
             assert!(parse_arguments(arguments.into_iter().map(OsString::from)).is_err());

@@ -25,3 +25,56 @@ jobs:
         run: cargo +stable build --release --locked
       - name: Test MCP and viewer updates
         run: python3 scripts/test_mcp.py
+      - name: Test local and hosted mode boundaries
+        run: python3 scripts/test_modes.py
+      - name: Install browser test dependencies
+        run: npm ci --prefix tests/browser
+      - name: Install test Chromium
+        run: npx --prefix tests/browser playwright install --with-deps chromium
+      - name: Test personal connection controls in Chromium
+        run: node tests/browser/connections.mjs
+      - name: Test Memos capture controls in Chromium
+        run: node tests/browser/memos.mjs
+      - name: Test source selection, provenance and explicit refresh in Chromium
+        run: node tests/browser/sources.mjs
+      - name: Start synthetic Keycloak
+        run: python3 spikes/identity/keycloak.py up
+      - name: Test hosted authentication
+        run: python3 scripts/test_hosted_auth.py
+      - name: Test durable work and process recovery
+        run: python3 scripts/test_hosted_persistence.py
+      - name: Test hosted text and Markdown imports in Chromium
+        run: python3 scripts/test_hosted_imports.py
+      - name: Test hosted API and MCP over verified HTTPS
+        run: python3 scripts/test_hosted_mcp.py
+      - name: Test private read-only provider connections
+        run: python3 scripts/test_connections.py
+      - name: Test private Memos source capture
+        run: python3 scripts/test_memos_source.py
+      - name: Test private Jira description capture and ADF fidelity
+        run: python3 scripts/test_jira_source.py
+      - name: Test concurrent agents, private events and real browser tabs
+        run: python3 scripts/test_coordination.py
+      - name: Remove synthetic Keycloak
+        if: always()
+        run: python3 spikes/identity/keycloak.py down
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate private Compose configuration
+        run: |
+          docker compose -f deploy/compose.yaml config --quiet
+          docker compose -f deploy/compose.yaml -f deploy/compose.loopback.yaml config --quiet
+      - name: Build the Linux image
+        run: docker build --tag mddiff:ci .
+      - name: Start synthetic Keycloak
+        run: python3 spikes/identity/keycloak.py up
+      - name: Test isolated hosted container and persistent volumes
+        run: python3 scripts/test_container.py --image mddiff:ci
+      - name: Test isolation, quotas and ten-user capacity
+        run: python3 scripts/test_container.py --image mddiff:ci --capacity
+      - name: Remove synthetic Keycloak
+        if: always()
+        run: python3 spikes/identity/keycloak.py down

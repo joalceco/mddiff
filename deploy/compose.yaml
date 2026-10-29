@@ -1,0 +1,42 @@
+name: mddiff
+services:
+  mddiff:
+    image: ${MDDIFF_IMAGE:-mddiff:staging}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    stop_grace_period: 15s
+    volumes:
+      - type: bind
+        source: ${MDDIFF_DATA_DIR:-/srv/mddiff/data}
+        target: /var/lib/mddiff
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MDDIFF_SECRETS_DIR:-/srv/mddiff/secrets}/oidc.json
+        target: /run/secrets/mddiff/oidc.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MDDIFF_SECRETS_DIR:-/srv/mddiff/secrets}/connections.json
+        target: /run/secrets/mddiff/connections.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MDDIFF_SECRETS_DIR:-/srv/mddiff/secrets}/connections.key
+        target: /run/secrets/mddiff/connections.key
+        read_only: true
+        bind:
+          create_host_path: false

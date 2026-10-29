@@ -1,0 +1,8 @@
+{
+  "issuer": "https://identity.example/realms/mddiff",
+  "public_origin": "https://review.example",
+  "client_id": "mddiff-hosted-web",
+  "introspection_client_id": "mddiff-resource",
+  "introspection_client_secret": "REPLACE_WITH_INTROSPECTION_SECRET",
+  "audience": "mddiff-resource"
+}

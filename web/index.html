@@ -14,10 +14,52 @@
     <span class="header-caption">Una segunda mirada a tus documentos.</span>
     <div class="header-actions">
       <span id="connection" class="connection" role="status">Conectando…</span>
+      <span id="auth-user" class="session-user" hidden></span>
+      <button id="connections-button" type="button" aria-haspopup="dialog" aria-controls="connections-dialog" hidden>Conexiones</button>
+      <button id="logout-button" type="button" hidden>Cerrar sesión</button>
+      <button id="login-button" type="button" hidden>Iniciar sesión</button>
       <button id="reload-button" type="button" title="Volver a leer los archivos desde disco" disabled>↻ Recargar</button>
       <button id="theme-toggle" type="button">Modo claro</button>
     </div>
   </header>
+  <dialog id="connections-dialog" class="connections-dialog" aria-labelledby="connections-title" aria-describedby="connections-description">
+    <div class="connections-heading">
+      <h2 id="connections-title">Conexiones personales</h2>
+      <button id="connections-close" type="button" aria-label="Cerrar conexiones">Cerrar</button>
+    </div>
+    <p id="connections-description">Conecta tus cuentas a los destinos aprobados. mddiff solo realiza lecturas.</p>
+    <p id="connections-status" class="connections-status" role="status"></p>
+    <p id="connections-error" class="connections-error" role="alert" hidden></p>
+    <ul id="connections-list" class="connections-list" aria-label="Destinos disponibles"></ul>
+    <form id="memos-form" class="memos-form" autocomplete="off" hidden>
+      <h3 id="memos-title">Conectar Memos</h3>
+      <label for="memos-token">Token personal de Memos</label>
+      <input id="memos-token" type="password" name="memos_token" autocomplete="off" spellcheck="false" required aria-describedby="memos-warning">
+      <p id="memos-warning" class="connection-warning">El token de Memos puede permitir cambios. mddiff solo realiza lecturas.</p>
+      <label class="connection-acknowledgement"><input id="memos-acknowledge" type="checkbox" required><span>Entiendo el alcance del token y autorizo su uso para lecturas.</span></label>
+      <div class="connection-form-actions">
+        <button id="memos-cancel" type="button">Cancelar</button>
+        <button id="memos-submit" type="submit">Conectar Memos</button>
+      </div>
+    </form>
+    <p class="connections-note">Desconectar elimina la credencial de mddiff y conserva el trabajo. Para revocarla en el proveedor, retira el token de Memos o el acceso de mddiff en Atlassian.</p>
+  </dialog>
+  <dialog id="memos-source-dialog" class="connections-dialog" aria-labelledby="memos-source-title" aria-describedby="memos-source-description">
+    <div class="connections-heading">
+      <h2 id="memos-source-title">Abrir Memos</h2>
+      <button id="memos-source-close" type="button" aria-label="Cerrar Abrir Memos">Cerrar</button>
+    </div>
+    <p id="memos-source-description">La nota reemplaza el original y conserva la propuesta actual. Se guarda una captura; no se sincroniza automáticamente.</p>
+    <p id="memos-source-status" class="connections-status" role="status"></p>
+    <p id="memos-source-error" class="connections-error" role="alert" hidden></p>
+    <form id="memos-source-form" class="memos-source-form" autocomplete="off">
+      <label for="memos-source-destination">Conexión de Memos</label>
+      <select id="memos-source-destination" name="destination" required disabled></select>
+      <label for="memos-source-reference">ID o URL de la nota</label>
+      <input id="memos-source-reference" name="reference" placeholder="memos/abc123 o URL de esta instancia" aria-describedby="memos-source-description" autocomplete="off" spellcheck="false" required disabled>
+      <div class="connection-form-actions"><button id="memos-source-open" type="submit" disabled>Abrir</button></div>
+    </form>
+  </dialog>
   <div class="workspace">
     <main>
       <div class="toolbar">
@@ -33,10 +75,13 @@
       <div id="error" class="error" role="alert" hidden></div>
       <div id="review-bar" class="review-bar" hidden>
         <div id="review-summary" role="status"></div>
-        <div id="change-navigation" class="change-navigation" hidden>
-          <span id="change-position">0 / 0</span>
-          <button id="previous-change" class="icon-button" title="Cambio anterior (K)" aria-label="Cambio anterior">↑</button>
-          <button id="next-change" class="icon-button" title="Cambio siguiente (J)" aria-label="Cambio siguiente">↓</button>
+        <div class="review-actions">
+          <button id="delete-work" type="button" hidden>Borrar trabajo</button>
+          <div id="change-navigation" class="change-navigation" hidden>
+            <span id="change-position">0 / 0</span>
+            <button id="previous-change" class="icon-button" title="Cambio anterior (K)" aria-label="Cambio anterior">↑</button>
+            <button id="next-change" class="icon-button" title="Cambio siguiente (J)" aria-label="Cambio siguiente">↓</button>
+          </div>
         </div>
       </div>
       <div id="pane-headers" class="pane-headers">
@@ -44,11 +89,38 @@
           <label for="base-path" class="pane-label">ORIGINAL</label>
           <strong id="base-name">Sin archivo</strong>
           <input id="base-path" class="pane-path" name="base_path" placeholder="Ruta del original.md" title="Ruta relativa a la carpeta autorizada o absoluta dentro de ella" required autocomplete="off" spellcheck="false">
+          <div id="base-source-actions" class="source-actions" role="group" aria-label="Elegir origen del original" hidden>
+            <button id="base-paste" type="button" aria-label="Pegar texto del original" aria-controls="base-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="base-upload" type="button" aria-label="Subir Markdown original" disabled>Subir .md</button>
+            <button id="base-jira" type="button" aria-haspopup="dialog" aria-controls="memos-source-dialog" disabled>Abrir Jira</button>
+            <button id="base-memos" type="button" aria-haspopup="dialog" aria-controls="memos-source-dialog" disabled>Abrir Memos</button>
+          </div>
+          <div id="base-provenance" class="source-provenance" hidden></div>
+          <button id="base-refresh-source" class="source-refresh" type="button" hidden disabled>Actualizar origen</button>
+          <input id="base-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown original" hidden disabled>
+          <textarea id="base-text" class="paste-text" rows="4" aria-label="Markdown del original" aria-describedby="base-import-status" placeholder="Pega aquí el Markdown del original…" spellcheck="false" hidden></textarea>
+          <span id="base-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
         <div id="candidate-header">
           <label for="candidate-path" class="pane-label">PROPUESTA</label>
           <strong id="candidate-name">Sin archivo</strong>
           <input id="candidate-path" class="pane-path" name="candidate_path" placeholder="Ruta de la propuesta.md" title="La comparación se abre automáticamente al indicar ambos archivos" autocomplete="off" spellcheck="false">
+          <div id="candidate-source-actions" class="source-actions" role="group" aria-label="Elegir origen de la propuesta" hidden>
+            <button id="candidate-paste" type="button" aria-label="Pegar texto de la propuesta" aria-controls="candidate-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="candidate-upload" type="button" aria-label="Subir Markdown propuesto" disabled>Subir .md</button>
+            <button id="candidate-agent" type="button" aria-expanded="false" aria-controls="candidate-agent-help" disabled>Recibir del agente</button>
+          </div>
+          <div id="candidate-provenance" class="source-provenance" hidden></div>
+          <div id="candidate-agent-help" class="agent-help" hidden>
+            <strong>Recibe la propuesta en este espacio</strong>
+            <p>Conecta tu agente al MCP de este visor e inicia sesión con tu misma cuenta.</p>
+            <code id="candidate-agent-url"></code>
+            <p>Pídele que lea el trabajo actual y envíe su propuesta. La comparación se actualizará automáticamente; el original se conserva.</p>
+            <a href="https://github.com/joalceco/mddiff/blob/feature/multiuser-sources/docs/planning/remote-agents.md#configurar-codex" target="_blank" rel="noopener noreferrer">Ver configuración de Codex</a>
+          </div>
+          <input id="candidate-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown propuesto" hidden disabled>
+          <textarea id="candidate-text" class="paste-text" rows="4" aria-label="Markdown de la propuesta" aria-describedby="candidate-import-status" placeholder="Pega aquí el Markdown de la propuesta…" spellcheck="false" hidden></textarea>
+          <span id="candidate-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
       </div>
       <section id="empty" class="empty-state">
