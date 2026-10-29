@@ -213,6 +213,60 @@ fn memo_resource(reference: &str, destination: &Url) -> Result<String, AppError>
     }
     Ok(format!("memos/{id}"))
 }
+fn issue_key(reference: &str, destination: &Url) -> Result<String, AppError> {
+    let reference = reference.trim();
+    let bad = || {
+        AppError::bad_request(
+            "Usa una clave de issue Jira o su URL /browse/CLAVE del sitio seleccionado, sin parámetros ni fragmentos.",
+        )
+    };
+    if reference.is_empty()
+        || reference.len() > 2048
+        || reference.contains(['%', '\\'])
+        || reference.chars().any(char::is_control)
+    {
+        return Err(bad());
+    }
+    let key = if let Ok(url) = Url::parse(reference) {
+        let raw_path = reference
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+            .ok_or_else(bad)?;
+        if url.origin() != destination.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || raw_path != url.path()
+        {
+            return Err(bad());
+        }
+        url.path()
+            .strip_prefix("/browse/")
+            .ok_or_else(bad)?
+            .to_owned()
+    } else {
+        reference.to_owned()
+    };
+    let key = key.to_ascii_uppercase();
+    let (project, number) = key.split_once('-').ok_or_else(bad)?;
+    if key.len() > 128
+        || !project
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_uppercase)
+        || !project
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        || number.is_empty()
+        || number.starts_with('0')
+        || !number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    Ok(key)
+}
+
 fn loopback_url(url: &Url) -> bool {
     url.host_str() == Some("localhost")
         || url
@@ -396,6 +450,19 @@ impl Providers {
         body: Option<Value>,
         limit: usize,
     ) -> Result<Value, AppError> {
+        self.request_json(url, pins, token, body, limit, false)
+            .await
+    }
+
+    async fn request_json(
+        &self,
+        url: Url,
+        pins: &[IpAddr],
+        token: Option<&str>,
+        body: Option<Value>,
+        limit: usize,
+        issue_read: bool,
+    ) -> Result<Value, AppError> {
         let host = url.host_str().ok_or_else(failed)?;
         let port = url.port_or_known_default().ok_or_else(failed)?;
         let addresses: Vec<SocketAddr> = tokio::time::timeout(
@@ -430,16 +497,40 @@ impl Providers {
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
-        let mut response = request.send().await.map_err(|_| failed())?;
-        if !response.status().is_success()
-            || response.content_length().is_some_and(|n| n > limit as u64)
-        {
-            return Err(failed());
+        let mut response = request
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| failed())?;
+        if !response.status().is_success() {
+            return Err(if issue_read {
+                match response.status() {
+                    StatusCode::FORBIDDEN => AppError(StatusCode::BAD_GATEWAY, "Tu conexión personal no tiene permiso para leer este issue de Jira.".into()),
+                    StatusCode::NOT_FOUND => AppError(StatusCode::NOT_FOUND, "Jira no encuentra el issue o no permite verlo con esta conexión.".into()),
+                    StatusCode::TOO_MANY_REQUESTS => AppError(StatusCode::TOO_MANY_REQUESTS, "Jira alcanzó su límite de solicitudes. Espera antes de intentar abrir el origen de nuevo.".into()),
+                    _ => failed(),
+                }
+            } else {
+                failed()
+            });
+        }
+        let too_large = || {
+            if issue_read {
+                AppError(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "La respuesta de Jira supera el límite de importación.".into(),
+                )
+            } else {
+                failed()
+            }
+        };
+        if response.content_length().is_some_and(|n| n > limit as u64) {
+            return Err(too_large());
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| failed())? {
             if bytes.len() + chunk.len() > limit {
-                return Err(failed());
+                return Err(too_large());
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -562,8 +653,209 @@ impl Providers {
                 resource,
                 captured_at: now(),
                 updated_at,
+                title: None,
+                converter: None,
+                warnings: vec![],
             },
             stored.metadata.generation,
+        ))
+    }
+
+    async fn jira_credential(
+        self: &Arc<Self>,
+        owner: &VerifiedIdentity,
+        destination: &str,
+        expected: Option<u64>,
+        capacity: crate::RequestCapacity,
+    ) -> Result<(Credential, u64), AppError> {
+        let d = self.destination(destination)?;
+        if d.provider != Provider::Jira {
+            return Err(AppError::bad_request("Elige una conexión de Jira Cloud."));
+        }
+        let lock = Arc::clone(
+            self.refreshes
+                .lock()
+                .await
+                .entry((owner.clone(), destination.into()))
+                .or_default(),
+        );
+        let guard = lock.lock_owned().await;
+        let stored = self
+            .store
+            .get(owner, d.provider, destination)
+            .await?
+            .ok_or_else(stale)?;
+        if expected.is_some_and(|n| n != stored.metadata.generation) {
+            return Err(stale());
+        }
+        let credential: Credential =
+            serde_json::from_value(stored.credential.value().clone()).map_err(|_| failed())?;
+        if credential.binding != d.binding(&self.jira) {
+            return Err(failed());
+        }
+        let generation = stored.metadata.generation;
+        if credential.expires_at.is_some_and(|n| n > now() + 30) {
+            self.jira_resources(d, &credential.access_token).await?;
+            if self
+                .store
+                .metadata(owner, d.provider, destination)
+                .await?
+                .generation
+                != generation
+            {
+                return Err(stale());
+            }
+            return Ok((credential, generation));
+        }
+        let refresh = credential.refresh_token.ok_or_else(failed)?;
+        let this = Arc::clone(self);
+        let owner = owner.clone();
+        let destination = destination.to_owned();
+        // A rotating refresh token must be persisted even if its HTTP caller disconnects.
+        tokio::spawn(async move {
+            let _capacity = capacity;
+            let _refresh = guard;
+            let d = this.destination(&destination)?;
+            let next = this
+                .exchange(
+                    d,
+                    json!({"grant_type":"refresh_token","refresh_token":refresh}),
+                )
+                .await?;
+            let revision = this.save(&owner, d, generation, next).await?["revision"]
+                .as_u64()
+                .ok_or_else(failed)?;
+            let stored = this
+                .store
+                .get(&owner, d.provider, &destination)
+                .await?
+                .ok_or_else(stale)?;
+            if stored.metadata.generation != revision {
+                return Err(stale());
+            }
+            let next: Credential =
+                serde_json::from_value(stored.credential.value().clone()).map_err(|_| failed())?;
+            this.jira_resources(d, &next.access_token).await?;
+            if this
+                .store
+                .metadata(&owner, d.provider, &destination)
+                .await?
+                .generation
+                != revision
+            {
+                return Err(stale());
+            }
+            Ok((next, revision))
+        })
+        .await
+        .map_err(|_| failed())?
+    }
+
+    async fn read_issue(
+        self: &Arc<Self>,
+        owner: &VerifiedIdentity,
+        destination: &str,
+        reference: &str,
+        capacity: crate::RequestCapacity,
+        workspace: &mddiff::workspace::Workspace,
+    ) -> Result<(Document, SourceMetadata, u64), AppError> {
+        let d = self.destination(destination)?;
+        if d.provider != Provider::Jira {
+            return Err(AppError::bad_request("Elige una conexión de Jira Cloud."));
+        }
+        let requested = issue_key(reference, &d.url)?;
+        let (credential, generation) = self
+            .jira_credential(owner, destination, None, Arc::clone(&capacity))
+            .await?;
+        let mut url = self.jira_endpoint(
+            &format!(
+                "/ex/jira/{}/rest/api/3/issue/{requested}",
+                d.cloud_id.as_deref().ok_or_else(failed)?
+            ),
+            false,
+        );
+        url.query_pairs_mut()
+            .append_pair("fields", "summary,description,updated");
+        let mut issue = self
+            .request_json(
+                url,
+                &[],
+                Some(&credential.access_token),
+                None,
+                MEMO_RESPONSE_LIMIT,
+                true,
+            )
+            .await?;
+        let canonical = issue["key"].as_str().ok_or_else(failed)?.to_owned();
+        if issue_key(&canonical, &d.url).ok().as_deref() != Some(canonical.as_str()) {
+            return Err(failed());
+        }
+        let title = issue["fields"]["summary"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control))
+            .ok_or_else(failed)?
+            .to_owned();
+        let updated_at = match issue["fields"].get("updated") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value))
+                if value.len() <= 64 && !value.chars().any(char::is_control) =>
+            {
+                Some(value.clone())
+            }
+            _ => return Err(failed()),
+        };
+        let description = issue["fields"]
+            .get_mut("description")
+            .filter(|v| !v.is_null())
+            .map(Value::take)
+            .ok_or_else(|| {
+                AppError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "El issue de Jira no tiene descripción. Se conserva el trabajo actual.".into(),
+                )
+            })?;
+        let compute = workspace.compute_permit().await?;
+        // Conversion shares the diff budget and retains capacity after caller cancellation.
+        let mut converted = tokio::task::spawn_blocking(move || {
+            let _capacity = capacity;
+            let _compute = compute;
+            mddiff::adf::convert(&description)
+        })
+        .await
+        .map_err(|_| failed())?
+        .map_err(|e| {
+            if e.0 == StatusCode::BAD_REQUEST {
+                AppError(StatusCode::BAD_GATEWAY, e.1)
+            } else {
+                e
+            }
+        })?;
+        if canonical != requested {
+            converted.warnings.push(format!(
+                "Jira resolvió la referencia solicitada a su clave actual {canonical}."
+            ));
+        }
+        Ok((
+            Document {
+                label: format!("Jira · {canonical}.md"),
+                markdown: converted.markdown,
+            },
+            SourceMetadata {
+                provider: Provider::Jira,
+                destination: d.id.clone(),
+                resource: canonical.clone(),
+                url: d
+                    .url
+                    .join(&format!("/browse/{canonical}"))
+                    .map_err(|_| failed())?
+                    .into(),
+                captured_at: now(),
+                updated_at,
+                title: Some(title),
+                converter: Some(mddiff::adf::VERSION.into()),
+                warnings: converted.warnings,
+            },
+            generation,
         ))
     }
 
@@ -686,6 +978,7 @@ fn providers(app: &App) -> Result<&Arc<Providers>, AppError> {
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/sources/memos", post(capture_memo))
+        .route("/api/sources/jira", post(capture_issue))
         .route("/api/connections", get(list))
         .route("/api/connections/{id}/memos", post(memos))
         .route("/api/connections/{id}/authorize", post(authorize))
@@ -711,6 +1004,47 @@ async fn capture_memo(
     let p = providers(&app)?;
     let (base, source, generation) = p
         .read_memo(&owner, &input.destination, &input.reference)
+        .await?;
+    if app
+        .auth
+        .as_ref()
+        .ok_or_else(failed)?
+        .revalidate(&session)
+        .await?
+        != owner
+    {
+        return Err(failed());
+    }
+    workspace
+        .capture_base_if_revision(input.expected_revision, base, source, generation)
+        .await
+        .map(Json)
+}
+
+async fn capture_issue(
+    State(app): State<Arc<App>>,
+    Extension(owner): Extension<VerifiedIdentity>,
+    Extension(session): Extension<SessionHandle>,
+    Extension(capacity): Extension<crate::RequestCapacity>,
+    payload: Result<Json<MemoCapture>, JsonRejection>,
+) -> Result<Json<Arc<mddiff::workspace::Snapshot>>, AppError> {
+    let input = crate::json_payload(payload)?;
+    let workspace = app.workspace(Some(Extension(owner.clone()))).await?;
+    if workspace.work().await.revision != input.expected_revision {
+        return Err(AppError(
+            StatusCode::CONFLICT,
+            "El trabajo cambió. Recarga antes de abrir otro issue.".into(),
+        ));
+    }
+    let p = providers(&app)?;
+    let (base, source, generation) = p
+        .read_issue(
+            &owner,
+            &input.destination,
+            &input.reference,
+            capacity,
+            workspace.as_ref(),
+        )
         .await?;
     if app
         .auth
@@ -857,80 +1191,39 @@ async fn check(
     State(app): State<Arc<App>>,
     Extension(owner): Extension<VerifiedIdentity>,
     Extension(_session): Extension<SessionHandle>,
+    Extension(capacity): Extension<crate::RequestCapacity>,
     RoutePath(id): RoutePath<String>,
     payload: Result<Json<Revision>, JsonRejection>,
 ) -> Result<Json<Value>, AppError> {
     let input = crate::json_payload(payload)?;
-    // Finish refresh rotation and its durable commit even if the caller disconnects.
-    tokio::spawn(async move {
-        let p = providers(&app)?;
-        let d = p.destination(&id)?;
-        // Serialize rotating refresh-token use; delete remains free to invalidate an in-flight check.
-        let lock = Arc::clone(
-            p.refreshes
-                .lock()
-                .await
-                .entry((owner.clone(), id.clone()))
-                .or_default(),
-        );
-        let _refresh = lock.lock().await;
-        let stored = p
-            .store
-            .get(&owner, d.provider, &id)
-            .await?
-            .ok_or_else(stale)?;
-        if stored.metadata.generation != input.expected_revision {
-            return Err(stale());
-        }
-        let credential: Credential =
-            serde_json::from_value(stored.credential.value().clone()).map_err(|_| failed())?;
-        if credential.binding != d.binding(&p.jira) {
-            return Err(failed());
-        }
-        if d.provider == Provider::Memos {
-            p.memos_identity(d, &credential.access_token).await?;
-        } else {
-            let credential = if credential.expires_at.is_none_or(|n| n <= now() + 30) {
-                let refresh = credential.refresh_token.as_ref().ok_or_else(failed)?;
-                let next = p
-                    .exchange(
-                        d,
-                        json!({"grant_type":"refresh_token","refresh_token":refresh}),
-                    )
-                    .await?;
-                // Save each rotated refresh token before any further network request.
-                let revision = p.save(&owner, d, input.expected_revision, next).await?["revision"]
-                    .as_u64()
-                    .unwrap();
-                let stored = p
-                    .store
-                    .get(&owner, d.provider, &id)
-                    .await?
-                    .ok_or_else(stale)?;
-                if stored.metadata.generation != revision {
-                    return Err(stale());
-                }
-                let next: Credential = serde_json::from_value(stored.credential.value().clone())
-                    .map_err(|_| failed())?;
-                p.jira_resources(d, &next.access_token).await?;
-                if p.store.metadata(&owner, d.provider, &id).await?.generation != revision {
-                    return Err(stale());
-                }
-                return Ok(Json(json!({"revision":revision,"connected":true})));
-            } else {
-                credential
-            };
-            p.jira_resources(d, &credential.access_token).await?;
-        }
-        if p.store.metadata(&owner, d.provider, &id).await?.generation != input.expected_revision {
-            return Err(stale());
-        }
-        Ok(Json(
-            json!({"revision":input.expected_revision,"connected":true}),
-        ))
-    })
-    .await
-    .map_err(|_| failed())?
+    let p = providers(&app)?;
+    let d = p.destination(&id)?;
+    if d.provider == Provider::Jira {
+        let (_, revision) = p
+            .jira_credential(&owner, &id, Some(input.expected_revision), capacity)
+            .await?;
+        return Ok(Json(json!({"revision":revision,"connected":true})));
+    }
+    let stored = p
+        .store
+        .get(&owner, d.provider, &id)
+        .await?
+        .ok_or_else(stale)?;
+    if stored.metadata.generation != input.expected_revision {
+        return Err(stale());
+    }
+    let credential: Credential =
+        serde_json::from_value(stored.credential.value().clone()).map_err(|_| failed())?;
+    if credential.binding != d.binding(&p.jira) {
+        return Err(failed());
+    }
+    p.memos_identity(d, &credential.access_token).await?;
+    if p.store.metadata(&owner, d.provider, &id).await?.generation != input.expected_revision {
+        return Err(stale());
+    }
+    Ok(Json(
+        json!({"revision":input.expected_revision,"connected":true}),
+    ))
 }
 
 async fn disconnect(
@@ -986,6 +1279,38 @@ mod tests {
             assert!(memo_resource(bad, &origin).is_err(), "{bad}");
         }
     }
+    #[test]
+    fn jira_references_are_keys_for_one_approved_site() {
+        let site = Url::parse("https://team-alpha.atlassian.net/").unwrap();
+        for reference in [
+            "PROJ-12",
+            "proj-12",
+            "https://team-alpha.atlassian.net/browse/PROJ-12",
+        ] {
+            assert_eq!(issue_key(reference, &site).unwrap(), "PROJ-12");
+        }
+        for reference in [
+            "",
+            "12",
+            "-12",
+            "PROJ-0",
+            "PROJ-01",
+            "PROJ--1",
+            "PROJ-1/other",
+            "../PROJ-1",
+            "https://evil.example/browse/PROJ-1",
+            "https://team-alpha.atlassian.net.evil/browse/PROJ-1",
+            "https://user@team-alpha.atlassian.net/browse/PROJ-1",
+            "https://team-alpha.atlassian.net/browse/PROJ-1?token=private",
+            "https://team-alpha.atlassian.net/browse/PROJ-1#part",
+            "https://team-alpha.atlassian.net/browse/a/../PROJ-1",
+            "https://team-alpha.atlassian.net/browse/%50ROJ-1",
+            "https://team-alpha.atlassian.net/rest/api/3/issue/PROJ-1",
+        ] {
+            assert!(issue_key(reference, &site).is_err(), "{reference}");
+        }
+    }
+
     #[test]
     fn destinations_and_network_are_closed_to_arbitrary_hosts_and_metadata() {
         for bad in [

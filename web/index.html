@@ -89,12 +89,14 @@
           <label for="base-path" class="pane-label">ORIGINAL</label>
           <strong id="base-name">Sin archivo</strong>
           <input id="base-path" class="pane-path" name="base_path" placeholder="Ruta del original.md" title="Ruta relativa a la carpeta autorizada o absoluta dentro de ella" required autocomplete="off" spellcheck="false">
-          <div id="base-source-actions" class="source-actions" hidden>
+          <div id="base-source-actions" class="source-actions" role="group" aria-label="Elegir origen del original" hidden>
             <button id="base-paste" type="button" aria-label="Pegar texto del original" aria-controls="base-text" aria-expanded="false" disabled>Pegar texto</button>
             <button id="base-upload" type="button" aria-label="Subir Markdown original" disabled>Subir .md</button>
+            <button id="base-jira" type="button" aria-haspopup="dialog" aria-controls="memos-source-dialog" disabled>Abrir Jira</button>
             <button id="base-memos" type="button" aria-haspopup="dialog" aria-controls="memos-source-dialog" disabled>Abrir Memos</button>
           </div>
           <div id="base-provenance" class="source-provenance" hidden></div>
+          <button id="base-refresh-source" class="source-refresh" type="button" hidden disabled>Actualizar origen</button>
           <input id="base-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown original" hidden disabled>
           <textarea id="base-text" class="paste-text" rows="4" aria-label="Markdown del original" aria-describedby="base-import-status" placeholder="Pega aquí el Markdown del original…" spellcheck="false" hidden></textarea>
           <span id="base-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
@@ -103,9 +105,18 @@
           <label for="candidate-path" class="pane-label">PROPUESTA</label>
           <strong id="candidate-name">Sin archivo</strong>
           <input id="candidate-path" class="pane-path" name="candidate_path" placeholder="Ruta de la propuesta.md" title="La comparación se abre automáticamente al indicar ambos archivos" autocomplete="off" spellcheck="false">
-          <div id="candidate-source-actions" class="source-actions" hidden>
+          <div id="candidate-source-actions" class="source-actions" role="group" aria-label="Elegir origen de la propuesta" hidden>
             <button id="candidate-paste" type="button" aria-label="Pegar texto de la propuesta" aria-controls="candidate-text" aria-expanded="false" disabled>Pegar texto</button>
             <button id="candidate-upload" type="button" aria-label="Subir Markdown propuesto" disabled>Subir .md</button>
+            <button id="candidate-agent" type="button" aria-expanded="false" aria-controls="candidate-agent-help" disabled>Recibir del agente</button>
+          </div>
+          <div id="candidate-provenance" class="source-provenance" hidden></div>
+          <div id="candidate-agent-help" class="agent-help" hidden>
+            <strong>Recibe la propuesta en este espacio</strong>
+            <p>Conecta tu agente al MCP de este visor e inicia sesión con tu misma cuenta.</p>
+            <code id="candidate-agent-url"></code>
+            <p>Pídele que lea el trabajo actual y envíe su propuesta. La comparación se actualizará automáticamente; el original se conserva.</p>
+            <a href="https://github.com/joalceco/mddiff/blob/feature/multiuser-sources/docs/planning/remote-agents.md#configurar-codex" target="_blank" rel="noopener noreferrer">Ver configuración de Codex</a>
           </div>
           <input id="candidate-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown propuesto" hidden disabled>
           <textarea id="candidate-text" class="paste-text" rows="4" aria-label="Markdown de la propuesta" aria-describedby="candidate-import-status" placeholder="Pega aquí el Markdown de la propuesta…" spellcheck="false" hidden></textarea>

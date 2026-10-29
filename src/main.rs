@@ -17,7 +17,10 @@ use futures_util::{StreamExt, stream};
 use mddiff::{
     AppError,
     local::LocalReader,
-    workspace::{Document, RequestKind, Snapshot, VerifiedIdentity, Work, Workspace, Workspaces},
+    workspace::{
+        Document, InputKind, ManualInput, RequestKind, Snapshot, VerifiedIdentity, Work, Workspace,
+        Workspaces,
+    },
 };
 use rmcp::schemars;
 use serde::Deserialize;
@@ -27,6 +30,7 @@ use std::{
 };
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const CONTENT_BODY_LIMIT: usize = 24 * 1024 * 1024 + 16 * 1024;
+pub(crate) type RequestCapacity = Arc<Vec<tokio::sync::OwnedSemaphorePermit>>;
 
 enum Mode {
     Local(Arc<LocalReader>),
@@ -178,17 +182,18 @@ async fn health(State(app): State<Arc<App>>) -> StatusCode {
 
 async fn quotas(
     State(app): State<Arc<App>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
     let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp")
-        || path.starts_with("/api/sources/");
+        || path.starts_with("/api/sources/")
+        || (path.starts_with("/api/connections/") && path.ends_with("/check"));
     let permits = match (&app.mode, request.extensions().get::<VerifiedIdentity>()) {
         (Mode::Hosted(store), Some(identity)) if protected_content => {
             let kind = if path == "/api/events" {
                 RequestKind::Events
-            } else if path.starts_with("/api/sources/") {
+            } else if path.starts_with("/api/sources/") || path.ends_with("/check") {
                 RequestKind::Source
             } else {
                 RequestKind::Content
@@ -206,6 +211,8 @@ async fn quotas(
         }
         _ => return next.run(request).await,
     };
+    let permits: RequestCapacity = Arc::new(permits);
+    request.extensions_mut().insert(Arc::clone(&permits));
     let response = next.run(request).await;
     response.map(|body| {
         axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
@@ -252,6 +259,8 @@ struct ReplaceWork {
     expected_revision: u64,
     base: Document,
     candidate: Option<Document>,
+    base_input: Option<ManualInput>,
+    candidate_input: Option<ManualInput>,
 }
 
 #[derive(Deserialize)]
@@ -267,15 +276,38 @@ struct ProposeRequest {
     candidate: Document,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeWorkRequest {
+    expected_revision: u64,
+    candidate: Document,
+    candidate_input: Option<ManualInput>,
+}
+
 async fn propose_work(
     State(app): State<Arc<App>>,
     identity: Option<Extension<VerifiedIdentity>>,
-    payload: Result<Json<ProposeRequest>, JsonRejection>,
+    session: Option<Extension<auth::SessionHandle>>,
+    payload: Result<Json<ProposeWorkRequest>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let input = json_payload(payload)?;
+    if input.candidate_input.is_some() && session.is_none() {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "La procedencia de carga requiere una sesión web.".into(),
+        ));
+    }
+    let kind = input
+        .candidate_input
+        .map(InputKind::from)
+        .unwrap_or(if session.is_some() {
+            InputKind::Text
+        } else {
+            InputKind::Api
+        });
     app.workspace(identity)
         .await?
-        .propose_if_revision(input.expected_revision, input.candidate)
+        .propose_with_input_if_revision(input.expected_revision, input.candidate, kind)
         .await
         .map(Json)
 }
@@ -290,12 +322,25 @@ async fn get_work(
 async fn replace_work(
     State(app): State<Arc<App>>,
     identity: Option<Extension<VerifiedIdentity>>,
+    session: Option<Extension<auth::SessionHandle>>,
     payload: Result<Json<ReplaceWork>, JsonRejection>,
 ) -> Result<Json<Arc<Snapshot>>, AppError> {
     let request = json_payload(payload)?;
+    if (request.base_input.is_some() || request.candidate_input.is_some()) && session.is_none() {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "La procedencia de carga requiere una sesión web.".into(),
+        ));
+    }
     app.workspace(identity)
         .await?
-        .replace_if_revision(request.expected_revision, request.base, request.candidate)
+        .replace_with_inputs_if_revision(
+            request.expected_revision,
+            request.base,
+            request.candidate,
+            request.base_input.map(Into::into),
+            request.candidate_input.map(Into::into),
+        )
         .await
         .map(Json)
 }
@@ -348,9 +393,13 @@ async fn events(
         }
         (None, _) => None,
     };
+    let marker = match &authorization {
+        Some((auth, handle)) => Some(auth.session_marker(handle).await?),
+        None => None,
+    };
     let events = stream::unfold(
-        (workspace.subscribe(), true, authorization),
-        |(mut receiver, first, authorization)| async move {
+        (workspace.subscribe(), true, authorization, marker),
+        |(mut receiver, first, authorization, marker)| async move {
             if !first {
                 loop {
                     if let Some((auth, session)) = &authorization {
@@ -374,10 +423,16 @@ async fn events(
                 return None;
             }
             let revision = *receiver.borrow_and_update();
-            let event = Event::default()
+            let mut event = Event::default()
                 .event("revision")
                 .data(revision.to_string());
-            Some((Ok::<_, Infallible>(event), (receiver, false, authorization)))
+            if let Some(marker) = &marker {
+                event = event.id(marker.clone());
+            }
+            Some((
+                Ok::<_, Infallible>(event),
+                (receiver, false, authorization, marker),
+            ))
         },
     );
     Ok(Sse::new(events).keep_alive(

@@ -6,7 +6,7 @@
 
 mddiff es una herramienta local para revisar documentos y propuestas de una IA. Conserva encabezados, listas, tablas y código; alinea los bloques y resalta las palabras que cambiaron. Un único proceso Rust sirve el visor, una API HTTP y un servidor MCP. Un agente puede abrir una comparación y actualizar el navegador que ya tienes abierto.
 
-El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado dispone de una beta por invitación con Keycloak, espacios privados y MCP remoto. Google/GitHub sigue pendiente.
+El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado integra cuentas por invitación con Keycloak, espacios privados, orígenes Jira/Memos y MCP remoto. Google/GitHub sigue pendiente.
 
 **Ir a:** [Inicio rápido](#inicio-rápido) · [Contenedor](#ejecutar-hosted-en-un-contenedor) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
@@ -19,7 +19,8 @@ El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están
 | Detalle de cambios | Fondo rojo o verde por bloque, signos `−` y `+`, y un highlight más intenso en las palabras modificadas. |
 | Vista de fuente | Markdown exacto, rangos de líneas y fragmentos de sintaxis modificados. |
 | Entradas alojadas | Pegar texto o subir `.md` desde las cabeceras; apertura y comparación automáticas. |
-| Original desde Memos | Capturar una nota por ID o URL con la conexión personal y conservar su procedencia. |
+| Orígenes externos | Capturar una nota de Memos o la descripción ADF de un issue Jira con la conexión personal. |
+| Procedencia | Tipo de entrada, referencia y momento de captura; título, conversión y avisos cuando corresponda. Actualización remota explícita. |
 | Integración | MCP/API local por rutas y MCP/API alojados con OAuth de usuario. |
 | Actualización de la vista | SSE avisa al navegador cuando otra solicitud abre un documento o una comparación. |
 | Navegación | Botones y atajos `J` / `K` para recorrer los cambios. |
@@ -118,9 +119,15 @@ cargo run --release --locked -- --mode hosted --port 3848 \
 
 Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no concede acceso por sí solo. Las sesiones usan cookies opacas `HttpOnly` y, con HTTPS, `Secure` y prefijo `__Host-`. El backend verifica el access token por introspección en cada solicitud y vuelve a comprobar los eventos SSE durante la espera. La identidad estable es `issuer` + `sub`, sin selección de propietario mediante headers o campos del cliente.
 
-Sin configuración OIDC, hosted solo puede arrancar cerrado en `127.0.0.1`: estado, trabajo y eventos rechazan el acceso con `401`, y salud devuelve `503`. Otra dirección exige OIDC configurado y debe ser una IPv4 privada o `0.0.0.0`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y las notas de Memos ya pueden abrirse como original; la lectura de Jira sigue pendiente.
+Sin configuración OIDC, hosted solo puede arrancar cerrado en `127.0.0.1`: estado, trabajo y eventos rechazan el acceso con `401`, y salud devuelve `503`. Otra dirección exige OIDC configurado y debe ser una IPv4 privada o `0.0.0.0`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y sus notas o descripciones de issues pueden abrirse como original, sin escribir cambios en los proveedores.
 
 Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub sigue pendiente; la beta alojada utiliza cuentas por invitación. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
+
+### Actualizar una base alojada
+
+El almacenamiento actual usa el **esquema SQLite 4**. Al abrir una base de esquema 3, la aplicación añade los metadatos opcionales de origen y recepción de ambos lados dentro de una transacción. Conserva Markdown, revisiones, procedencia externa y conexiones existentes. Los trabajos antiguos no reciben fechas de importación inventadas.
+
+Antes de actualizar, activa mantenimiento, detén el escritor y conserva una copia coherente de datos, claves y configuración, junto con la imagen anterior. Un binario que solo admite el esquema 3 no puede abrir la base migrada al 4: un rollback que lo requiera debe recuperar el checkpoint compatible, sin reducir manualmente `user_version`. Una base con esquema futuro se rechaza. Consulta [el trabajo persistente](docs/planning/current-work.md) y [la recuperación operativa](docs/planning/beta-operations.md).
 
 ### Ejecutar hosted en un contenedor
 
@@ -128,7 +135,7 @@ El repositorio incluye un Dockerfile con bases fijadas por digest y Compose para
 
 `deploy/compose.yaml` no publica puertos del host. Para un proxy en el host, `deploy/compose.loopback.yaml` publica solo `127.0.0.1:3847`; el proxy termina HTTPS y conserva el origen canónico. `GET` y `HEAD /healthz` permiten comprobar preparación sin documentos ni credenciales. Salud no comprueba continuamente la disponibilidad del IdP.
 
-Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. La [operación de la beta por invitación](docs/planning/beta-operations.md) documenta el despliegue verificado, respaldo cifrado, restauración, observabilidad y rollback. La configuración real de infraestructura permanece fuera del repositorio.
+Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. La [operación de la beta por invitación](docs/planning/beta-operations.md) conserva la evidencia del despliegue anterior, respaldo cifrado, restauración, observabilidad y rollback. Esa evidencia histórica no demuestra que los cambios actuales ya estén publicados. La configuración real de infraestructura permanece fuera del repositorio.
 
 ## Usar el visor
 
@@ -148,6 +155,12 @@ En modo local, abre documentos mediante sus rutas:
 
 **Recargar**, junto a **Conectado**, vuelve a leer los archivos desde disco. También puedes repetir la llamada a la API o a MCP. No hay un observador automático de cambios en disco.
 
+### Elegir el origen en hosted
+
+La cabecera de **Original** permite **Pegar texto**, **Subir .md**, **Abrir Jira** o **Abrir Memos**. La de **Propuesta** permite texto, archivo o **Recibir del agente**, que muestra el endpoint MCP de ese mismo visor y la configuración de Codex. No se añade un lateral ni se genera contenido con un modelo integrado.
+
+La procedencia muestra el origen y el momento registrado por el servidor. Las capturas externas añaden referencia y enlace; Jira puede incluir título, fecha remota, versión de conversión y avisos. Los metadatos se conservan al volver a entrar. Consulta [el selector de orígenes y sus estados](docs/planning/source-picker.md).
+
 ### Pegar o subir documentos en hosted
 
 1. Entra con una cuenta admitida y elige **Pegar texto** o **Subir .md** en la cabecera de **Original**.
@@ -165,6 +178,18 @@ Un conflicto `409` conserva el trabajo vigente y el borrador de texto visible. C
 En hosted, pulsa **Abrir Memos** en la cabecera de **Original**, elige una conexión personal conectada e introduce el ID o la URL de una nota de esa instancia. **Abrir** captura su Markdown exacto, conserva la propuesta actual y muestra su procedencia. La captura no se sincroniza automáticamente y no importa adjuntos.
 
 La integración soporta Memos 0.31.0 y requiere las conexiones de S07. Los fallos conservan el trabajo vigente; un conflicto obliga a revisar antes de reintentar. Consulta [las referencias admitidas, API, procedencia y pruebas](docs/planning/memos-source.md).
+
+### Abrir una descripción de Jira Cloud
+
+Pulsa **Abrir Jira** en la cabecera de **Original**, elige una conexión personal e introduce una clave como `PROJ-123` o una URL `/browse/PROJ-123` del sitio autorizado. La aplicación lee solo título, descripción y fecha de actualización. La descripción se convierte de ADF a Markdown; el título y la referencia quedan como metadatos.
+
+La conversión `adf-md-v1` conserva el contenido admitido de párrafos, encabezados, marcas, listas, enlaces, tablas simples y código. Los nodos o atributos no representables generan avisos visibles y una representación identificable; no se ocultan como una importación íntegra. No se leen comentarios, adjuntos ni recursos enlazados. Los errores de permiso o disponibilidad conservan la comparación. Consulta [el alcance, límites y contrato de Jira](docs/planning/jira-source.md).
+
+### Actualizar una captura y coordinar pestañas
+
+Las capturas de Jira/Memos permanecen fijas aunque cambie el proveedor. **Actualizar origen** vuelve a leer la referencia capturada con la revisión vigente al pulsar; conserva la propuesta. Un fallo o conflicto `409` mantiene el trabajo confirmado y exige un nuevo intento explícito, sin sobrescribir una propuesta recibida durante la lectura.
+
+Las pestañas de una persona comparten revisiones y borrado; los agentes usan ese mismo trabajo por API/MCP. Las lecturas y los eventos de la interfaz se vinculan a su sesión para que una pestaña antigua se vacíe al cambiar de cuenta. No se introduce colaboración entre personas ni un historial de eventos. Consulta [el contrato de coordinación](docs/planning/coordination.md).
 
 Los atajos no se activan mientras escribes en un campo. El tema se cambia desde **Modo claro** / **Modo oscuro** y se conserva en el mismo navegador. Un error al abrir una ruta mantiene el último documento o comparación válidos.
 
@@ -292,8 +317,11 @@ Los POST locales requieren `Content-Type: application/json` y rechazan campos de
 | `PUT /api/work` | Reemplaza el trabajo con `{expected_revision, base, candidate}`. Cada documento contiene `label` y `markdown`; la propuesta puede ser `null`. |
 | `PATCH /api/work` | Envía `{expected_revision, candidate}` para sustituir solo la propuesta y conservar el original. Requiere un original ya abierto. |
 | `DELETE /api/work` | Borra ambos lados usando `{expected_revision}`; mantiene el contador incrementado. |
+| `POST /api/sources/jira` o `POST /api/sources/memos` | Captura un original con `{destination, reference, expected_revision}`. Solo sesión web; conserva la propuesta. |
 
 Las mutaciones por sesión web requieren admisión, Origin exacto y su token CSRF. Los agentes pueden usar Bearer OAuth para GET, PUT y PATCH; DELETE con Bearer devuelve `403`. No se mezclan ambas credenciales. Las mutaciones devuelven un snapshot como `/api/state`; un conflicto de revisión devuelve `409` sin sobrescribir el trabajo. Un fallo de almacenamiento devuelve `503` y conserva el último estado publicado. Véase [el contrato para agentes](docs/planning/remote-agents.md#api-para-agentes).
+
+La interfaz puede indicar `base_input` o `candidate_input` con `"text"`/`"file"` únicamente para el lado que importa. Estos campos son opcionales y se admiten en mutaciones con sesión web; no eligen propietario ni permiten enviar fechas. El servidor registra tipo y momento en el snapshot. Las entradas Bearer se identifican como API y `submit_proposal` como agente. Reemplazar un lado conserva los metadatos del otro cuando su documento no cambia.
 
 Cada documento admite 2 MiB y cada etiqueta, entre 1 y 255 bytes UTF-8 sin caracteres de control. La petición de `/api/work` admite 24 MiB + 16 KiB para los escapes de JSON; este margen no amplía el tamaño de cada documento. Consulta [los ejemplos de revisión y recuperación](docs/planning/current-work.md#ejemplo-de-revisión-esperada).
 
@@ -305,12 +333,13 @@ Cada documento admite 2 MiB y cada etiqueta, entre 1 y 255 bytes UTF-8 sin carac
 | `base_path`, `candidate_path` | Rutas absolutas resueltas en local; etiquetas de presentación en hosted, sin acceso al sistema de archivos. Son `null` cuando no hay documento en ese lado. |
 | `comparison` | Objeto con `rows`, `added`, `removed` y `source_equal`; inicialmente es `null`. |
 | `processing_ms` | Tiempo de procesamiento en Rust, en milisegundos. |
+| `base_source`, `base_input`, `candidate_input` | Metadatos opcionales: captura externa del original y tipo/momento de recepción de cada lado. Los tipos de entrada son `text`, `file`, `api` o `agent`. |
 
 Cada fila de `comparison.rows` contiene `kind` (`equal`, `replace`, `insert` o `delete`), `left` y `right`. Un lado ausente es `null`. Cada bloque conserva `source`, HTML saneado en `html`, y `start_line` / `end_line` con numeración desde 1. Los campos opcionales `highlighted_html` y `highlighted_source` contienen el detalle resaltado cuando corresponde. Cada fragmento de `highlighted_source` tiene `text` y `changed`.
 
 Al abrir solo un documento, la comparación interna usa ese mismo texto en ambos lados y `candidate_path` es `null`. La interfaz presenta únicamente el original.
 
-El SSE envía la revisión vigente al conectar y las posteriores cuando cambia el estado. No es un historial de eventos: consulta `/api/state` para obtener la versión actual. El navegador se reconecta si el servidor se reinicia.
+El SSE envía la revisión vigente al conectar y las posteriores cuando cambia el estado. No es un historial de eventos: consulta `/api/state` para obtener la versión actual. En hosted, el campo `id` se vincula a la sesión y `data` conserva la revisión numérica; el visor rechaza un evento de otra sesión. El navegador se reconecta si el servidor se reinicia, y una sesión terminada vuelve a autenticarse.
 
 ### Errores
 
@@ -331,7 +360,7 @@ Los errores de apertura de la API usan un cuerpo como `{"error":"El archivo debe
 
 En modo local, el visor lee archivos y mantiene la comparación en memoria. No guarda documentos, no incorpora llamadas a modelos ni envía contenido a servicios de análisis. El tema es la única preferencia que la interfaz escribe en `localStorage`. Reiniciar el servidor elimina su estado en memoria; puedes abrir de nuevo los archivos o indicarlos al arrancar.
 
-En hosted, SQLite conserva únicamente el trabajo actual por persona: original, propuesta, etiquetas y revisión. El HTML y el diff se recalculan al recuperarlo. Las sesiones y tokens del IdP permanecen en memoria en el backend y no se exponen al navegador. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO ni borra el trabajo persistente.
+En hosted, SQLite conserva únicamente el trabajo actual por persona: original, propuesta, etiquetas, revisión y procedencia. El HTML y el diff se recalculan al recuperarlo. Las sesiones y tokens del IdP permanecen en memoria en el backend y no se exponen al navegador. El cierre de sesión invalida el SID local e intenta revocar el refresh token; no garantiza un cierre global del SSO ni borra el trabajo persistente.
 
 El cliente remoto obtiene su propio token OAuth para mddiff. El backend lo verifica mediante introspección en cada solicitud, con emisor, sujeto, audiencia, scope y admisión; no almacenes ese Bearer en ejemplos, logs públicos o el repositorio. Las herramientas comparten únicamente el espacio de la identidad verificada y tratan el Markdown como datos del documento.
 
@@ -446,7 +475,9 @@ La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts
 
 Las conexiones personales se verifican con `python3 scripts/test_connections.py` y proveedores sintéticos auditados; la pantalla tiene una prueba de contrato en `node tests/browser/connections.mjs`. La [guía de conexiones](docs/planning/personal-connections.md#reproducir-las-pruebas) describe requisitos y límites. No se ha validado el consentimiento con cuentas reales de Jira/Memos.
 
-La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sintéticas y `node tests/browser/memos.mjs` para el contrato de pantalla. No consulta notas privadas reales. La persistencia incorpora esquema 3 para la procedencia; consulta [la guía de captura](docs/planning/memos-source.md).
+La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sintéticas y `node tests/browser/memos.mjs` para el contrato de pantalla. No consulta notas privadas reales. La entrega S08 incorporó el esquema 3 para procedencia externa; el almacenamiento actual usa el esquema 4 para añadir el origen y momento de recepción. Consulta [la guía de captura](docs/planning/memos-source.md).
+
+La descripción de Jira tiene fixtures y un runner en `python3 scripts/test_jira_source.py`, además de las pruebas Rust del conversor ADF. El selector se comprueba con `node tests/browser/sources.mjs`; la coordinación con `python3 scripts/test_coordination.py`, que incluye navegador real y carreras controladas. Ejecuta de forma secuencial las integraciones que comparten la fixture Keycloak. Estos contratos sintéticos no acreditan OAuth ni una lectura con una cuenta Jira real. Consulta [Jira](docs/planning/jira-source.md), [orígenes](docs/planning/source-picker.md) y [coordinación](docs/planning/coordination.md) para el estado y alcance de cada comprobación.
 
 El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. Consulta [el procedimiento y el estado de su evidencia](docs/planning/container-deployment.md#verificar-el-empaquetado); su existencia no demuestra publicación. La opción `--capacity` comprueba diez sesiones y guarda un informe agregado privado; consulta [el método, las cuotas y los límites de esa medición](docs/planning/capacity-validation.md).
 

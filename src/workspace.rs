@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
@@ -31,7 +35,7 @@ impl VerifiedIdentity {
 }
 
 /// Already-read Markdown; a label is displayed but is never opened as a path.
-#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
     pub label: String,
@@ -48,6 +52,56 @@ pub struct SourceMetadata {
     pub captured_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converter: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum InputKind {
+    Text,
+    File,
+    Api,
+    Agent,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManualInput {
+    Text,
+    File,
+}
+
+impl From<ManualInput> for InputKind {
+    fn from(value: ManualInput) -> Self {
+        match value {
+            ManualInput::Text => Self::Text,
+            ManualInput::File => Self::File,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct InputMetadata {
+    pub kind: InputKind,
+    pub captured_at: u64,
+}
+
+impl InputMetadata {
+    fn capture(kind: InputKind) -> Self {
+        Self {
+            kind,
+            captured_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -57,6 +111,11 @@ pub struct Work {
     pub candidate: Option<Document>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_source: Option<SourceMetadata>,
+    // Rendering metadata stays out of the raw API/MCP document contract.
+    #[serde(skip_serializing)]
+    pub base_input: Option<InputMetadata>,
+    #[serde(skip_serializing)]
+    pub candidate_input: Option<InputMetadata>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +127,10 @@ pub struct Snapshot {
     pub processing_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_source: Option<SourceMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_input: Option<InputMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_input: Option<InputMetadata>,
 }
 
 #[derive(Default)]
@@ -253,6 +316,8 @@ impl Workspace {
                     comparison: None,
                     processing_ms: 0.0,
                     base_source: None,
+                    base_input: None,
+                    candidate_input: None,
                 }),
                 work: Arc::new(Work::default()),
             }),
@@ -311,6 +376,17 @@ impl Workspace {
         self.revisions.subscribe()
     }
 
+    pub async fn compute_permit(&self) -> Result<Option<OwnedSemaphorePermit>, AppError> {
+        match &self.budget {
+            Some(budget) => Arc::clone(&budget.compute)
+                .acquire_owned()
+                .await
+                .map(Some)
+                .map_err(|_| capacity()),
+            None => Ok(None),
+        }
+    }
+
     pub async fn replace_content(
         self: &Arc<Self>,
         base: Document,
@@ -325,10 +401,50 @@ impl Workspace {
         base: Document,
         candidate: Option<Document>,
     ) -> Result<Arc<Snapshot>, AppError> {
+        self.replace_with_inputs_if_revision(expected, base, candidate, None, None)
+            .await
+    }
+
+    pub async fn replace_with_inputs_if_revision(
+        self: &Arc<Self>,
+        expected: u64,
+        base: Document,
+        candidate: Option<Document>,
+        base_kind: Option<InputKind>,
+        candidate_kind: Option<InputKind>,
+    ) -> Result<Arc<Snapshot>, AppError> {
+        let previous = self.work().await;
+        if previous.revision != expected {
+            return Err(conflict());
+        }
+        let same_base = previous.base.as_ref() == Some(&base) && base_kind.is_none();
+        let same_candidate = previous.candidate == candidate && candidate_kind.is_none();
+        let base_source = if same_base {
+            previous.base_source.clone()
+        } else {
+            None
+        };
+        let base_input = if same_base {
+            previous.base_input.clone()
+        } else {
+            Some(InputMetadata::capture(base_kind.unwrap_or(InputKind::Api)))
+        };
+        let candidate_input = if candidate.is_none() {
+            None
+        } else if same_candidate {
+            previous.candidate_input.clone()
+        } else {
+            Some(InputMetadata::capture(
+                candidate_kind.unwrap_or(InputKind::Api),
+            ))
+        };
         self.update(Some(expected), None, move || {
             Ok(Work {
                 base: Some(base),
                 candidate,
+                base_source,
+                base_input,
+                candidate_input,
                 ..Work::default()
             })
         })
@@ -348,6 +464,16 @@ impl Workspace {
         expected: u64,
         candidate: Document,
     ) -> Result<Arc<Snapshot>, AppError> {
+        self.propose_with_input_if_revision(expected, candidate, InputKind::Api)
+            .await
+    }
+
+    pub async fn propose_with_input_if_revision(
+        self: &Arc<Self>,
+        expected: u64,
+        candidate: Document,
+        kind: InputKind,
+    ) -> Result<Arc<Snapshot>, AppError> {
         let work = self.work().await;
         if work.revision != expected {
             return Err(conflict());
@@ -364,11 +490,14 @@ impl Workspace {
             .clone();
         // The update checks the same revision again under the owner's lock.
         let base_source = work.base_source.clone();
+        let base_input = work.base_input.clone();
         self.update(Some(expected), None, move || {
             Ok(Work {
                 base: Some(base),
                 candidate: Some(candidate),
                 base_source,
+                base_input,
+                candidate_input: Some(InputMetadata::capture(kind)),
                 ..Work::default()
             })
         })
@@ -392,11 +521,13 @@ impl Workspace {
             return Err(conflict());
         }
         let candidate = work.candidate.clone();
+        let candidate_input = work.candidate_input.clone();
         self.update(Some(expected), Some(connection_generation), move || {
             Ok(Work {
                 base: Some(base),
                 candidate,
                 base_source: Some(source),
+                candidate_input,
                 ..Work::default()
             })
         })
@@ -486,6 +617,36 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
             "La procedencia requiere un documento original.",
         ));
     }
+    if (work.base.is_none() && work.base_input.is_some())
+        || (work.candidate.is_none() && work.candidate_input.is_some())
+        || (work.base_source.is_some() && work.base_input.is_some())
+    {
+        return Err(AppError::bad_request(
+            "La procedencia requiere el documento correspondiente.",
+        ));
+    }
+    if let Some(source) = &work.base_source
+        && (source
+            .title
+            .as_ref()
+            .is_some_and(|s| s.len() > 1024 || s.chars().any(char::is_control))
+            || source.converter.as_ref().is_some_and(|s| {
+                s.is_empty()
+                    || s.len() > 64
+                    || !s
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+            || source.warnings.len() > 64
+            || source
+                .warnings
+                .iter()
+                .any(|s| s.is_empty() || s.len() > 1024 || s.chars().any(char::is_control)))
+    {
+        return Err(AppError::bad_request(
+            "Los metadatos de conversión no son válidos.",
+        ));
+    }
     for document in work.base.iter().chain(work.candidate.iter()) {
         if document.markdown.len() as u64 > MAX_DOCUMENT_BYTES {
             return Err(AppError(
@@ -525,6 +686,8 @@ fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Curren
         comparison,
         processing_ms: started.elapsed().as_secs_f64() * 1000.0,
         base_source: work.base_source.clone(),
+        base_input: work.base_input.clone(),
+        candidate_input: work.candidate_input.clone(),
     });
     if validate_labels {
         struct Size(usize);
@@ -582,7 +745,120 @@ mod tests {
             url: "https://notes.example/memos/synthetic-1".into(),
             captured_at: 123456,
             updated_at: Some("2026-10-28T12:00:00Z".into()),
+            title: None,
+            converter: None,
+            warnings: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn input_capture_is_durable_preserves_unchanged_sides_and_clears_on_delete() {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        let saved;
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            let first = workspace
+                .replace_with_inputs_if_revision(
+                    0,
+                    document("original"),
+                    Some(document("proposal")),
+                    Some(InputKind::File),
+                    Some(InputKind::Text),
+                )
+                .await
+                .unwrap();
+            assert_eq!(first.base_input.as_ref().unwrap().kind, InputKind::File);
+            assert_eq!(
+                first.candidate_input.as_ref().unwrap().kind,
+                InputKind::Text
+            );
+            assert!(first.base_input.as_ref().unwrap().captured_at > 0);
+            let same = workspace
+                .replace_with_inputs_if_revision(
+                    1,
+                    document("original"),
+                    Some(document("proposal")),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(same.base_input, first.base_input);
+            assert_eq!(same.candidate_input, first.candidate_input);
+            let proposed = workspace
+                .propose_with_input_if_revision(2, document("agent proposal"), InputKind::Agent)
+                .await
+                .unwrap();
+            assert_eq!(proposed.base_input, first.base_input);
+            assert_eq!(
+                proposed.candidate_input.as_ref().unwrap().kind,
+                InputKind::Agent
+            );
+            connect(&store, &owner, 0);
+            let captured = workspace
+                .capture_base_if_revision(3, document("remote original"), source(), 1)
+                .await
+                .unwrap();
+            assert!(captured.base_input.is_none());
+            assert_eq!(captured.candidate_input, proposed.candidate_input);
+            let unchanged = workspace
+                .replace_if_revision(
+                    4,
+                    document("remote original"),
+                    Some(document("agent proposal")),
+                )
+                .await
+                .unwrap();
+            assert!(unchanged.base_source.is_some());
+            assert_eq!(unchanged.candidate_input, captured.candidate_input);
+            saved = unchanged.candidate_input.clone();
+            assert!(
+                serde_json::to_value(workspace.work().await)
+                    .unwrap()
+                    .get("candidate_input")
+                    .is_none()
+            );
+        }
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let workspace = store.for_user(&owner).await.unwrap();
+        assert_eq!(workspace.snapshot().await.candidate_input, saved);
+        let cleared = workspace.clear_if_revision(5).await.unwrap();
+        assert!(
+            cleared.base_input.is_none()
+                && cleared.candidate_input.is_none()
+                && cleared.base_source.is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_three_work_migrates_without_inventing_capture_times_or_changing_content() {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            store
+                .for_user(&owner)
+                .await
+                .unwrap()
+                .replace_if_revision(0, document("legacy"), Some(document("proposal")))
+                .await
+                .unwrap();
+        }
+        let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
+        connection.execute_batch("ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=3;").unwrap();
+        drop(connection);
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let workspace = store.for_user(&owner).await.unwrap();
+        let work = workspace.work().await;
+        assert_eq!(work.revision, 1);
+        assert_eq!(work.base.as_ref().unwrap().markdown, "legacy");
+        assert_eq!(work.candidate.as_ref().unwrap().markdown, "proposal");
+        assert!(
+            workspace.snapshot().await.base_input.is_none()
+                && workspace.snapshot().await.candidate_input.is_none()
+        );
     }
 
     #[tokio::test]
@@ -1104,7 +1380,7 @@ mod tests {
         let database = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
         database
             .execute_batch(
-                "ALTER TABLE current_work DROP COLUMN base_source; PRAGMA user_version=2;",
+                "ALTER TABLE current_work DROP COLUMN base_source; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=2;",
             )
             .unwrap();
         drop(database);
@@ -1133,7 +1409,7 @@ mod tests {
                 .database_for_test()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 
@@ -1419,7 +1695,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
         let columns: i32 = connection
             .query_row(
@@ -1428,8 +1704,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(columns, 8);
-        connection.pragma_update(None, "user_version", 4).unwrap();
+        assert_eq!(columns, 10);
+        connection.pragma_update(None, "user_version", 5).unwrap();
         drop(connection);
         assert!(Workspaces::persistent(&directory.0).is_err());
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
@@ -1437,7 +1713,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 

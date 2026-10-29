@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AppError,
-    workspace::{Document, SourceMetadata, VerifiedIdentity, Work},
+    workspace::{Document, InputMetadata, SourceMetadata, VerifiedIdentity, Work},
 };
 
 pub(crate) struct Storage {
@@ -99,7 +99,7 @@ impl Storage {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|_| unavailable())?;
-        if version > 3 {
+        if version > 4 {
             return Err(AppError::bad_request(
                 "La base usa un esquema más reciente; utiliza una versión compatible de mddiff.",
             ));
@@ -162,6 +162,19 @@ impl Storage {
                     "ALTER TABLE current_work ADD COLUMN base_source TEXT
                     CHECK (base_label IS NOT NULL OR base_source IS NULL);
                  PRAGMA user_version=3;",
+                )
+                .map_err(|_| unavailable())?;
+            transaction.commit().map_err(|_| unavailable())?;
+        }
+        if version < 4 {
+            let transaction = connection.transaction().map_err(|_| unavailable())?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE current_work ADD COLUMN base_input TEXT
+                    CHECK (base_label IS NOT NULL OR base_input IS NULL);
+                 ALTER TABLE current_work ADD COLUMN candidate_input TEXT
+                    CHECK (candidate_label IS NOT NULL OR candidate_input IS NULL);
+                 PRAGMA user_version=4;",
                 )
                 .map_err(|_| unavailable())?;
             transaction.commit().map_err(|_| unavailable())?;
@@ -279,7 +292,7 @@ impl Storage {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         connection
             .query_row(
-                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source
+                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source, base_input, candidate_input
             FROM current_work WHERE issuer=?1 AND subject=?2",
                 params![owner.issuer, owner.subject],
                 |row| {
@@ -292,6 +305,10 @@ impl Storage {
                     let base_source: Option<String> = row.get(5)?;
                     let base_source = base_source.map(|source| serde_json::from_str::<SourceMetadata>(&source)
                         .map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?;
+                    let input = |index| -> rusqlite::Result<Option<InputMetadata>> {
+                        let raw: Option<String> = row.get(index)?;
+                        raw.map(|s| serde_json::from_str(&s).map_err(|_| rusqlite::Error::InvalidQuery)).transpose()
+                    };
                     Ok(Work {
                         revision: revision as u64,
                         base: match base_label {
@@ -309,6 +326,8 @@ impl Storage {
                             None => None,
                         },
                         base_source,
+                        base_input: input(6)?,
+                        candidate_input: input(7)?,
                     })
                 },
             )
@@ -373,13 +392,26 @@ impl Storage {
             .map_err(|_| unavailable())?;
         let base = work.base.as_ref();
         let candidate = work.candidate.as_ref();
+        let base_input = work
+            .base_input
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| unavailable())?;
+        let candidate_input = work
+            .candidate_input
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| unavailable())?;
         transaction.execute("INSERT INTO current_work
-            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown,base_source)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(issuer,subject) DO UPDATE SET
+            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown,base_source,base_input,candidate_input)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(issuer,subject) DO UPDATE SET
             revision=excluded.revision,base_label=excluded.base_label,base_markdown=excluded.base_markdown,
-            candidate_label=excluded.candidate_label,candidate_markdown=excluded.candidate_markdown,base_source=excluded.base_source",
+            candidate_label=excluded.candidate_label,candidate_markdown=excluded.candidate_markdown,base_source=excluded.base_source,
+            base_input=excluded.base_input,candidate_input=excluded.candidate_input",
             params![owner.issuer,owner.subject,next,base.map(|d| &d.label),base.map(|d| &d.markdown),
-                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source]).map_err(|_| unavailable())?;
+                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source,base_input,candidate_input]).map_err(|_| unavailable())?;
         transaction.commit().map_err(|_| unavailable())?;
         Ok(next as u64)
     }

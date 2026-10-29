@@ -4,6 +4,8 @@ Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Ram
 
 Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. [S08: captura de Memos](memos-source.md) añade procedencia en el esquema 3.
 
+El código actual, al 2026-10-29, usa el esquema 4. Añade metadatos opcionales de tipo y momento de recepción por lado para [el selector de orígenes](source-picker.md); la evidencia histórica de S04 se conserva al final.
+
 [S12: contenedor alojado](container-deployment.md) amplía la operación mediante un bind explícito con OIDC, volumen y secretos externos. Las referencias al listener limitado a loopback corresponden a la entrega S04; los límites de borrado y retención siguen vigentes.
 
 ## Resultado y alcance
@@ -144,7 +146,9 @@ Si se pierde la respuesta o el cliente se desconecta durante una escritura, cons
 
 No elimines WAL/SHM ni copies únicamente `work.sqlite3` mientras una instancia está abierta: los archivos auxiliares pueden formar parte del estado confirmado. Véase [el archivo WAL como parte del estado persistente](https://sqlite.org/wal.html#the_wal_file). Esta historia no implementa un mecanismo de backup ni una reparación automática de bases.
 
-Una base con `user_version > 3` se rechaza al iniciar. No hay downgrade automático; no reduzcas manualmente ese número para abrirla con un binario anterior. Un binario anterior a S08 rechaza el esquema 3: conserva una copia coherente antes de actualizar si necesitas volver a ese binario.
+Una base con `user_version > 4` se rechaza al iniciar. La migración de 3 a 4 añade dos columnas opcionales dentro de una transacción y conserva documentos, revisiones, procedencia externa y conexiones. Las capturas antiguas no reciben fechas inventadas. `GET /api/work` y MCP conservan su contrato; `/api/state` expone `base_input` y `candidate_input` cuando existen.
+
+No hay downgrade automático; no reduzcas manualmente `user_version` para abrir una base con un binario anterior. El binario del esquema 3 no puede abrir una base migrada al 4. Antes de actualizar, conserva un checkpoint coherente de datos, claves, configuración e imagen compatible. Si necesitas recuperarlo, mantén el visor en mantenimiento: volver a esa copia descarta las escrituras posteriores a su captura.
 
 ## Borrado funcional, copias y retención
 

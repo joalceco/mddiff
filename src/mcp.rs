@@ -23,7 +23,7 @@ use axum::{
 use mddiff::local::LocalReader;
 use mddiff::{
     AppError,
-    workspace::{Snapshot, VerifiedIdentity, Workspace},
+    workspace::{InputKind, Snapshot, VerifiedIdentity, Workspace},
 };
 use serde::Deserialize;
 use tower::ServiceExt;
@@ -154,7 +154,11 @@ impl HostedMcp {
     ) -> CallToolResult {
         match self
             .workspace
-            .propose_if_revision(input.expected_revision, input.candidate)
+            .propose_with_input_if_revision(
+                input.expected_revision,
+                input.candidate,
+                InputKind::Agent,
+            )
             .await
         {
             Ok(snapshot) => CallToolResult::structured(summary(&snapshot, &self.viewer_url)),

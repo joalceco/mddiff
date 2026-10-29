@@ -133,7 +133,7 @@ def inspect_database(data, runtime, provider, expected):
             raw = path.read_bytes()
             check(all(secret.encode() not in raw for secret in provider.secrets), "SQLite or its journal stored a plaintext provider credential.")
     with closing(sqlite3.connect(database)) as connection:
-        check(connection.execute("PRAGMA user_version").fetchone()[0] == 3, "Encrypted connection storage has an unexpected schema version.")
+        check(connection.execute("PRAGMA user_version").fetchone()[0] == 4, "Encrypted connection storage has an unexpected schema version.")
         rows = connection.execute("SELECT issuer, subject, provider, destination, generation, nonce, ciphertext FROM encrypted_connections").fetchall()
     by_owner = {user["id"]: name for name, user in runtime["users"].items()}
     observed = {}

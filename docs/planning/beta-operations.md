@@ -20,7 +20,7 @@ Para admitir a una persona:
 4. Comprueba el cambio de contraseña y que el espacio nuevo esté vacío.
 5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE.
 
-Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. La lectura de Jira y Google/GitHub conservan sus historias pendientes.
+Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. En la instalación del 2026-10-28, la lectura de Jira y Google/GitHub conservaron sus historias pendientes. [S09](jira-source.md) registra el avance posterior de Jira; Google/GitHub sigue pendiente.
 
 ## Trabajo actual y siete copias diarias
 
@@ -46,7 +46,9 @@ Para una restauración, cierra primero el acceso y conserva el estado existente.
 
 El manifiesto de la entrega fija commit, identidad de imagen y esquema SQLite. Antes de actualizar, conserva la imagen conocida y un checkpoint coherente. Un despliegue fallido debe poder volver a esa imagen y su configuración sin borrar el directorio de trabajo.
 
-El ensayo de rollback de esta beta recupera la imagen verificada tras un candidato que no arranca. No demuestra un downgrade entre esquemas: el almacenamiento vigente usa el esquema 3 y rechaza versiones futuras. Si una actualización migra los datos, verifica su compatibilidad antes de iniciar; si requiere restaurar un checkpoint, ese procedimiento vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones para evitar ese intervalo.
+El ensayo del 2026-10-28 recuperó la imagen verificada tras un candidato que no arranca, con almacenamiento de esquema 3. No demostró un downgrade entre esquemas. El código actual usa el esquema 4; el binario anterior no puede abrir sus datos migrados. Si una actualización requiere restaurar un checkpoint, ese procedimiento vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones para evitar ese intervalo.
+
+Un rollback limitado al visor debe conservar el IdP y su PostgreSQL vigentes. Restaurarlos desde una copia anterior podría revertir cambios de contraseña o sesiones que ocurrieron durante el mantenimiento de la aplicación. Una recuperación completa del IdP exige cerrar también sus escrituras y revisar esa consecuencia.
 
 ## Observabilidad sin documentos
 

@@ -29,7 +29,7 @@ try {
       readyState = 1;
       listeners = {};
       constructor() { window.syntheticConnectionEvents = this; queueMicrotask(() => { this.onopen?.(); this.listeners.revision?.(); }); }
-      addEventListener(name, fn) { this.listeners[name] = fn; }
+      addEventListener(name, fn) { this.listeners[name] = (event = { lastEventId: "synthetic-session-a" }) => fn(event); }
       close() { this.readyState = 2; }
     };
   });

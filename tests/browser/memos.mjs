@@ -42,7 +42,7 @@ try {
       readyState = 1;
       listeners = {};
       constructor() { window.syntheticMemosEvents = this; queueMicrotask(() => { this.onopen?.(); this.listeners.revision?.(); }); }
-      addEventListener(name, fn) { this.listeners[name] = fn; }
+      addEventListener(name, fn) { this.listeners[name] = (event = { lastEventId: "synthetic-session-a" }) => fn(event); }
       close() { this.readyState = 2; }
     };
   });
@@ -74,7 +74,7 @@ try {
         writes.push({ method: req.method(), body });
         if (body.expected_revision !== work.revision) return send({ error: "El trabajo cambió." }, 409);
         if (req.method() === "PATCH") {
-          assert.deepEqual(Object.keys(body).sort(), ["candidate", "expected_revision"]);
+          assert.deepEqual(Object.keys(body).sort(), ["candidate", "candidate_input", "expected_revision"]);
           work.candidate = body.candidate;
         } else {
           assert.equal(req.method(), "PUT");
@@ -115,8 +115,8 @@ try {
   assert.equal(reads[0].reference, "https://notes.example/memos/abc123");
   assert.equal(await page.locator("#base-provenance a").getAttribute("href"), "https://notes.example/memos/abc123");
   assert.equal(await page.locator("#base-provenance a").getAttribute("rel"), "noopener noreferrer");
-  assert.equal(await page.locator("#base-provenance time").getAttribute("datetime"), new Date(1793145600 * 1000).toISOString());
-  assert.match(await page.locator("#base-provenance time").innerText(), /^Capturado /);
+  assert.equal(await page.locator("#base-provenance .source-captured").getAttribute("datetime"), new Date(1793145600 * 1000).toISOString());
+  assert.match(await page.locator("#base-provenance .source-captured").innerText(), /^Capturado /);
   await page.locator("#source-tab").click();
   assert.equal(await page.locator("#rows .cell code").first().textContent(), markdown);
   const readCount = reads.length;

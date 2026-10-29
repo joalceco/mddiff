@@ -37,6 +37,20 @@ async function api(context, method = "GET", body) {
   return response.json();
 }
 
+async function snapshot(context) {
+  const response = await context.request.get(BASE + "/api/state");
+  check(response.status() === 200, "The browser snapshot API returned an unexpected status.");
+  return response.json();
+}
+
+function inputMetadata(state, side, kind, notBefore) {
+  const input = state[`${side}_input`];
+  check(input?.kind === kind, `The ${side} import did not record its ${kind} origin.`);
+  check(Number.isSafeInteger(input.captured_at) && input.captured_at >= notBefore && input.captured_at <= Math.ceil(Date.now() / 1000) + 2,
+    `The ${side} import omitted a current server capture timestamp.`);
+  return input;
+}
+
 async function ready(page) {
   await page.waitForFunction(() => !document.querySelector("#auth-user").hidden && !document.querySelector("#base-paste").disabled);
 }
@@ -226,12 +240,24 @@ async function main() {
       check(accept.includes(".md") && accept.includes(".markdown"), "File chooser omitted supported Markdown extensions.");
     }
     phase = "file imports preserve BOM CRLF and Unicode";
+    const importStarted = Math.floor(Date.now() / 1000) - 2;
     const original = Buffer.from("\ufeff# Árbol 🌳\r\n\r\nTexto **verde** original.\r\n", "utf8");
     const candidate = Buffer.from("\ufeff# Árbol 🌲\r\n\r\nTexto **azul** propuesto.\r\n", "utf8");
     await upload(page, context, "base", "original.MD", original);
     await upload(page, context, "candidate", "propuesta.MARKDOWN", candidate);
     check((await api(context)).base.markdown === original.toString("utf8"), "Candidate upload changed the original.");
     check(await page.locator("#base-name").textContent() === "original.MD", "File label exposed a local path.");
+    const uploadedState = await snapshot(context);
+    const baseFileInput = inputMetadata(uploadedState, "base", "file", importStarted);
+    const candidateFileInput = inputMetadata(uploadedState, "candidate", "file", importStarted);
+    await page.reload();
+    await ready(page);
+    const recoveredFiles = await snapshot(context);
+    check(same(recoveredFiles.base_input, baseFileInput) && same(recoveredFiles.candidate_input, candidateFileInput), "Reload changed file origin metadata.");
+    for (const [side, input] of [["base", baseFileInput], ["candidate", candidateFileInput]]) {
+      check((await page.locator(`#${side}-provenance`).textContent()).includes("Archivo Markdown"), "Reload did not display the recorded file origin.");
+      check(await page.locator(`#${side}-provenance .source-received`).getAttribute("datetime") === new Date(input.captured_at * 1000).toISOString(), "Reload did not display the persisted file capture timestamp.");
+    }
 
     phase = "paste imports and keyboard focus";
     await page.locator("#base-paste").focus();
@@ -243,12 +269,26 @@ async function main() {
     await until(async () => (await api(context)).base?.markdown.includes("Cerrar también guarda"), "Closing before debounce lost pasted contents.");
     await until(() => page.locator("#base-text").isHidden(), "Closing a pending editor did not complete.");
     check((await api(context)).candidate.markdown === candidate.toString("utf8"), "Pasting the original replaced its proposal.");
+    const replacedBase = await snapshot(context);
+    inputMetadata(replacedBase, "base", "text", importStarted);
+    check(same(replacedBase.candidate_input, candidateFileInput), "Replacing the original changed the proposal's recorded file origin or capture time.");
     await paste(page, context, "base", "# Original pegado\n\nUnicode: español y 日本語.\n");
     const pastedBase = (await api(context)).base;
     await paste(page, context, "candidate", "# Propuesta pegada\n\nUnicode: español, 日本語 y 🌍.\n");
     check(same((await api(context)).base, pastedBase), "Pasting the proposal changed the original.");
+    const pastedState = await snapshot(context);
+    const baseTextInput = inputMetadata(pastedState, "base", "text", importStarted);
+    const candidateTextInput = inputMetadata(pastedState, "candidate", "text", importStarted);
     check(await page.locator("#base-text").isHidden(), "Two inline editors remained active.");
     await closed(page);
+    await page.reload();
+    await ready(page);
+    const recoveredText = await snapshot(context);
+    check(same(recoveredText.base_input, baseTextInput) && same(recoveredText.candidate_input, candidateTextInput), "Reload changed pasted-text origin metadata.");
+    for (const [side, input] of [["base", baseTextInput], ["candidate", candidateTextInput]]) {
+      check((await page.locator(`#${side}-provenance`).textContent()).includes("Texto pegado"), "Reload did not display the recorded text origin.");
+      check(await page.locator(`#${side}-provenance .source-received`).getAttribute("datetime") === new Date(input.captured_at * 1000).toISOString(), "Reload did not display the persisted text capture timestamp.");
+    }
     await page.locator("#base-paste").click();
     await page.locator("#base-text").waitFor({ state: "visible" });
     const clipboard = "# Portapapeles sintético\r\n\r\nConserva CRLF y 🌳.\r\n";

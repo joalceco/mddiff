@@ -38,6 +38,7 @@ let memosSourceVersion = 0;
 let memosSourceBusy = false;
 let memosSourceRevision = null;
 let memosSourceConflict = false;
+let memosSourceProvider = "memos";
 
 function activeMemosSource(previous, version) {
   return Boolean(previous && authentication === previous && memosSourceVersion === version && $("memos-source-dialog").open);
@@ -81,7 +82,7 @@ function memosSourceError(error) {
   $("memos-source-status").textContent = "";
   $("memos-source-error").textContent = error.status === 409
     ? "El trabajo cambió. Cierra y vuelve a abrir este diálogo para reintentar con el trabajo actual."
-    : error instanceof TypeError ? "No se pudo abrir Memos. Comprueba la conexión y vuelve a intentarlo." : error.message || "No se pudo abrir la nota. Vuelve a intentarlo.";
+    : error instanceof TypeError ? "No se pudo leer el origen. Comprueba la conexión y vuelve a intentarlo." : error.message || "No se pudo abrir el origen. Vuelve a intentarlo.";
   $("memos-source-error").hidden = false;
 }
 
@@ -89,10 +90,21 @@ function pendingTextImport() {
   return Boolean(textDraft && textDraft.version !== textDraft.savedVersion);
 }
 
-async function openMemosSource() {
+async function openMemosSource(provider = "memos") {
   if (busy || memosSourceBusy || pendingTextImport() || !canImport("base")) return;
   closeConnections();
   closeMemosSource();
+  memosSourceProvider = provider;
+  const jira = provider === "jira";
+  const label = jira ? "Jira Cloud" : "Memos";
+  $("memos-source-title").textContent = `Abrir ${label}`;
+  $("memos-source-close").setAttribute("aria-label", `Cerrar Abrir ${label}`);
+  $("memos-source-description").textContent = jira
+    ? "La descripción reemplaza el original y conserva la propuesta actual. Se guarda una captura convertida de ADF a Markdown, con avisos cuando corresponda."
+    : "La nota reemplaza el original y conserva la propuesta actual. Se guarda una captura; no se sincroniza automáticamente.";
+  document.querySelector('label[for="memos-source-destination"]').textContent = `Conexión de ${label}`;
+  document.querySelector('label[for="memos-source-reference"]').textContent = jira ? "Clave o URL del issue" : "ID o URL de la nota";
+  $("memos-source-reference").placeholder = jira ? "PROJ-123 o URL del sitio autorizado" : "memos/abc123 o URL de esta instancia";
   memosSourceRevision = session.revision;
   const version = memosSourceVersion;
   const previous = authentication;
@@ -102,13 +114,15 @@ async function openMemosSource() {
   try {
     const data = await memosSourceRequest("/api/connections");
     if (!data) return;
-    const destinations = data.enabled ? (data.destinations || []).filter((item) => item.provider === "memos" && item.connected) : [];
+    const destinations = data.enabled ? (data.destinations || []).filter((item) => item.provider === provider && item.connected) : [];
     for (const destination of destinations) {
       const option = document.createElement("option");
       option.value = destination.id; option.textContent = destination.label;
       $("memos-source-destination").append(option);
     }
-    $("memos-source-status").textContent = destinations.length ? "Solo se lee el contenido de la nota, sin adjuntos." : "No hay conexiones de Memos disponibles. Conecta tu cuenta desde Conexiones.";
+    $("memos-source-status").textContent = destinations.length
+      ? jira ? "Solo se lee la descripción, sin comentarios ni adjuntos." : "Solo se lee el contenido de la nota, sin adjuntos."
+      : `No hay conexiones de ${label} disponibles. Conecta tu cuenta desde Conexiones.`;
   } catch (error) { if (activeMemosSource(previous, version)) memosSourceError(error); }
   finally {
     if (activeMemosSource(previous, version)) {
@@ -118,7 +132,8 @@ async function openMemosSource() {
   }
 }
 
-$("base-memos").addEventListener("click", openMemosSource);
+$("base-memos").addEventListener("click", () => openMemosSource("memos"));
+$("base-jira").addEventListener("click", () => openMemosSource("jira"));
 $("memos-source-close").addEventListener("click", closeMemosSource);
 $("memos-source-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeMemosSource(); });
 $("memos-source-form").addEventListener("submit", async (event) => {
@@ -132,7 +147,7 @@ $("memos-source-form").addEventListener("submit", async (event) => {
   $("memos-source-status").textContent = "Leyendo y guardando la captura…";
   setMemosSourceBusy(true);
   try {
-    const snapshot = await memosSourceRequest("/api/sources/memos", {
+    const snapshot = await memosSourceRequest(`/api/sources/${memosSourceProvider}`, {
       destination: $("memos-source-destination").value, reference, expected_revision: memosSourceRevision,
     }, "POST");
     if (!snapshot) return;
@@ -304,7 +319,8 @@ $("memos-form").addEventListener("submit", async (event) => {
 });
 
 async function request(path, body, method = "POST") {
-  const response = await fetch(path, body === undefined ? {} : {
+  const response = await fetch(path, body === undefined ? (hosted && authentication && path.startsWith("/api/")
+    ? { headers: { "X-CSRF-Token": authentication.csrf_token } } : {}) : {
     method, headers: { "Content-Type": "application/json", ...(authentication ? { "X-CSRF-Token": authentication.csrf_token } : {}) }, body: JSON.stringify(body),
   });
   const text = await response.text();
@@ -333,6 +349,10 @@ function setBusy(value) {
   }
   $("reload-button").disabled = working || !$("base-path").value.trim();
   $("base-memos").disabled = working || !canImport("base") || pendingTextImport();
+  $("base-jira").disabled = $("base-memos").disabled;
+  $("base-refresh-source").disabled = $("base-memos").disabled || !session?.base_source;
+  $("base-refresh-source").setAttribute("aria-busy", String(working));
+  $("candidate-agent").disabled = working || !canImport("candidate") || pendingTextImport();
   const pending = textDraft && !textDraft.conflict && textDraft.version !== textDraft.savedVersion && textDraft.version !== textDraft.failedVersion;
   for (const side of ["base", "candidate"]) {
     for (const control of ["paste", "upload", "file"]) {
@@ -355,6 +375,9 @@ function resetImports() {
   importVersion++;
   clearTimeout(textDraft?.timer);
   textDraft = null;
+  $("candidate-agent-help").hidden = true;
+  $("candidate-agent-url").textContent = "";
+  $("candidate-agent").setAttribute("aria-expanded", "false");
   for (const side of ["base", "candidate"]) {
     fileRevisions[side] = null;
     $(`${side}-text`).value = "";
@@ -373,16 +396,17 @@ function importError(side, error) {
   showError(error);
 }
 
-async function replaceSide(work, side, document) {
+async function replaceSide(work, side, document, inputKind = "text") {
   if (document.markdown.length > MAX_DOCUMENT_BYTES || new TextEncoder().encode(document.markdown).length > MAX_DOCUMENT_BYTES) {
     throw new Error("Cada documento admite hasta 2 MiB en UTF-8.");
   }
   if (side === "candidate" && !work.base) throw new Error("Abre primero el original.");
-  if (side === "candidate") return request("/api/work", { expected_revision: work.revision, candidate: document }, "PATCH");
+  if (side === "candidate") return request("/api/work", { expected_revision: work.revision, candidate: document, candidate_input: inputKind }, "PATCH");
   return request("/api/work", {
     expected_revision: work.revision,
     base: document,
     candidate: work.candidate,
+    base_input: inputKind,
   }, "PUT");
 }
 
@@ -443,6 +467,7 @@ async function saveText(draft) {
     if (error.status === 409) {
       draft.conflict = true;
       await refresh();
+      if (textDraft !== draft || !authentication) return;
       error.message = "El trabajo cambió. Conserva tu texto y cierra y vuelve a abrir este campo antes de reintentar.";
     }
     importError(draft.side, error);
@@ -486,13 +511,14 @@ async function openUpload(side) {
       markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     } catch { throw new Error("El archivo no contiene texto UTF-8 válido."); }
     if (!authentication || version !== importVersion) return;
-    const snapshot = await replaceSide(work, side, { label, markdown });
+    const snapshot = await replaceSide(work, side, { label, markdown }, "file");
     if (!authentication || version !== importVersion) return;
     applySession(snapshot);
     importStatus(side, "Abierto y guardado.");
   } catch (error) {
     if (version !== importVersion || !authentication) return;
     if (error.status === 409) await refresh();
+    if (version !== importVersion || !authentication) return;
     importError(side, error);
   } finally { setBusy(false); }
 }
@@ -574,22 +600,51 @@ function applySession(data) {
 }
 
 async function refresh() {
+  const previous = authentication;
   try {
     const data = await request("/api/state");
-    if (!hosted || authentication) applySession(data);
+    if (hosted) {
+      if (!previous || authentication !== previous) return;
+    }
+    applySession(data);
   }
-  catch (error) { showError(error); }
+  catch (error) { if (!hosted || authentication === previous) showError(error); }
 }
 
 function fileName(path) { return path?.split(/[\\/]/).pop() || ""; }
 
+function sourceTime(node, value, prefix, kind) {
+  const date = new Date(typeof value === "number" ? value * 1000 : value);
+  if ((typeof value !== "number" && typeof value !== "string") || Number.isNaN(date.valueOf())) return;
+  const time = document.createElement("time");
+  time.className = `source-${kind}`;
+  time.dateTime = date.toISOString();
+  time.textContent = `${prefix} ${new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short" }).format(date)}`;
+  node.append(time);
+}
+
+function renderManualSource(side) {
+  const node = $(`${side}-provenance`);
+  const input = session?.[`${side}_input`];
+  node.replaceChildren();
+  node.hidden = !hosted || !authentication || !session?.[`${side}_path`] || !input;
+  if (node.hidden) return;
+  const labels = { text: "Texto pegado", file: "Archivo Markdown", agent: "Agente · MCP", api: "API" };
+  const label = document.createElement("span");
+  label.textContent = labels[input.kind] || "Markdown importado";
+  node.append(label);
+  sourceTime(node, input.captured_at, "Recibido", "received");
+}
+
 function renderBaseSource() {
+  renderManualSource("candidate");
   const node = $("base-provenance");
   const source = hosted && authentication && session?.base_source;
+  $("base-refresh-source").hidden = !source;
+  if (!source) { renderManualSource("base"); return; }
   node.replaceChildren();
-  node.hidden = !source;
-  if (!source) return;
-  const label = `Memos · ${source.resource}`;
+  node.hidden = false;
+  const label = `${source.provider === "jira" ? "Jira Cloud" : "Memos"} · ${source.resource}`;
   let url;
   try {
     url = new URL(source.url);
@@ -600,14 +655,56 @@ function renderBaseSource() {
   origin.textContent = label;
   if (url) { origin.href = url.href; origin.target = "_blank"; origin.rel = "noopener noreferrer"; }
   node.append(origin);
-  const captured = new Date(source.captured_at * 1000);
-  if (Number.isFinite(source.captured_at) && !Number.isNaN(captured.valueOf())) {
-    const time = document.createElement("time");
-    time.dateTime = captured.toISOString();
-    time.textContent = `Capturado ${captured.toLocaleString("es", { dateStyle: "medium", timeStyle: "short" })}`;
-    node.append(time);
+  if (source.title) {
+    const title = document.createElement("span"); title.className = "source-title"; title.textContent = source.title; node.append(title);
+  }
+  sourceTime(node, source.captured_at, "Capturado", "captured");
+  sourceTime(node, source.updated_at, "Origen actualizado", "updated");
+  const frozen = document.createElement("span"); frozen.textContent = "Captura fija · sin sincronización automática"; node.append(frozen);
+  if (source.converter) {
+    const converter = document.createElement("span"); converter.textContent = `Conversión ${source.converter}`; node.append(converter);
+  }
+  if (Array.isArray(source.warnings) && source.warnings.length) {
+    const warnings = document.createElement("div"); warnings.className = "source-warnings";
+    const heading = document.createElement("strong"); heading.textContent = "Avisos de conversión";
+    const list = document.createElement("ul");
+    for (const text of source.warnings) { const item = document.createElement("li"); item.textContent = text; list.append(item); }
+    warnings.append(heading, list); node.append(warnings);
   }
 }
+
+$("base-refresh-source").addEventListener("click", async () => {
+  if (busy || memosSourceBusy || pendingTextImport() || !canImport("base") || !session?.base_source) return;
+  const source = session.base_source;
+  if (!["jira", "memos"].includes(source.provider)) return;
+  const expected = session.revision;
+  const previous = authentication;
+  const version = importVersion;
+  setBusy(true);
+  importStatus("base", "Actualizando captura del origen…");
+  try {
+    const snapshot = await request(`/api/sources/${source.provider}`, { destination: source.destination, reference: source.resource, expected_revision: expected }, "POST");
+    if (authentication !== previous || importVersion !== version) return;
+    if (!await sameWebSession(previous)) { if (authentication === previous) endSession(); return; }
+    applySession(snapshot);
+    importStatus("base", "Captura actualizada. La propuesta se conserva.");
+  } catch (error) {
+    if (authentication !== previous || importVersion !== version) return;
+    if (error.status === 409) {
+      await refresh();
+      if (authentication !== previous || importVersion !== version) return;
+      error.message = "El trabajo cambió durante la lectura. Se conserva el trabajo reciente; vuelve a pulsar Actualizar origen para reintentar.";
+    }
+    importError("base", error);
+  } finally { setBusy(false); }
+});
+
+$("candidate-agent").addEventListener("click", () => {
+  const help = $("candidate-agent-help");
+  help.hidden = !help.hidden;
+  $("candidate-agent").setAttribute("aria-expanded", String(!help.hidden));
+  $("candidate-agent-url").textContent = `${window.location.origin}/mcp`;
+});
 
 function cell(block, status) {
   const node = document.createElement("div");
@@ -848,8 +945,10 @@ function connectEvents() {
       return true;
     })();
   };
-  source.addEventListener("revision", async () => {
-    if (await ready && events === source && source.readyState === EventSource.OPEN && (!hosted || authentication)) refresh();
+  source.addEventListener("revision", async (event) => {
+    if (!await ready || events !== source || source.readyState !== EventSource.OPEN) return;
+    if (hosted && (!authentication || event?.lastEventId !== authentication.csrf_token)) { endSession(); return; }
+    refresh();
   });
   source.onerror = async () => {
     if (events !== source) return;

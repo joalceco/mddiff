@@ -35,6 +35,8 @@ jobs:
         run: node tests/browser/connections.mjs
       - name: Test Memos capture controls in Chromium
         run: node tests/browser/memos.mjs
+      - name: Test source selection, provenance and explicit refresh in Chromium
+        run: node tests/browser/sources.mjs
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test hosted authentication
@@ -49,6 +51,10 @@ jobs:
         run: python3 scripts/test_connections.py
       - name: Test private Memos source capture
         run: python3 scripts/test_memos_source.py
+      - name: Test private Jira description capture and ADF fidelity
+        run: python3 scripts/test_jira_source.py
+      - name: Test concurrent agents, private events and real browser tabs
+        run: python3 scripts/test_coordination.py
       - name: Remove synthetic Keycloak
         if: always()
         run: python3 spikes/identity/keycloak.py down

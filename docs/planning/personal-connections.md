@@ -70,10 +70,10 @@ Cada petición fija sus resultados DNS comprobados, desactiva proxies del entorn
 
 ## Consentimiento de Jira Cloud
 
-Administración registra una aplicación 3LO de mddiff en Atlassian; cada usuario concede acceso a esa aplicación con su propia cuenta. No se pide un API token de Jira ni un secreto de aplicación a cada usuario.
+Administración registra una aplicación 3LO de mddiff en Atlassian; cada usuario concede acceso a esa aplicación con su propia cuenta. No se pide un API token de Jira ni un secreto de aplicación a cada usuario. Elige acceso **Resource-level** para limitar el consentimiento al sitio seleccionado. La aplicación es privada por defecto: habilitar **Sharing** permite que otras personas autoricen sus propias conexiones; no concede acceso a sus datos automáticamente ni publica la aplicación en Marketplace.
 
 1. Registra exactamente `https://review.example/connections/jira/callback` usando el origen público real de mddiff.
-2. Habilita `read:jira-work` y `offline_access` en la aplicación. No añadas permisos de escritura para este conector.
+2. Añade el scope clásico `read:jira-work`. El flujo solicita además `offline_access` para renovar el acceso. No añadas permisos de escritura para este conector.
 3. Configura el sitio y `cloud_id` autorizados en el JSON privado.
 4. Pulsa **Conectar** y acepta el consentimiento personal de Atlassian.
 5. Pulsa **Comprobar** para verificar el acceso al sitio aprobado.
@@ -86,7 +86,7 @@ La comprobación consulta `GET https://api.atlassian.com/oauth/token/accessible-
 
 Los refresh tokens rotativos se cifran y guardan antes de continuar con otras solicitudes. La renovación se serializa por usuario y destino; desconectar puede invalidar una comprobación en curso. Cortar la conexión HTTP del cliente no cancela una renovación ya iniciada.
 
-La [guía oficial de Jira 3LO](https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/) describe consentimiento, sitios accesibles y refresh tokens. Los scopes de la API se detallan en [scopes de Jira Cloud](https://developer.atlassian.com/cloud/jira/platform/scopes-for-oauth-2-3LO-and-forge-apps/).
+La [guía oficial de Jira 3LO](https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/), consultada el 2026-10-29, describe consentimiento, sitios accesibles, distribución y refresh tokens. Los scopes de la API se detallan en [scopes de Jira Cloud](https://developer.atlassian.com/cloud/jira/platform/scopes-for-oauth-2-3LO-and-forge-apps/).
 
 ## Token personal de Memos
 

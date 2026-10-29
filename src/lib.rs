@@ -1,3 +1,4 @@
+pub mod adf;
 pub mod connections;
 mod diff;
 pub mod local;

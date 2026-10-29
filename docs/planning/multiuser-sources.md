@@ -1,8 +1,10 @@
 # Beta alojada: cuentas y orígenes
 
-Fecha: 2026-10-27. Rama: `feature/multiuser-sources`.
+Fecha original: 2026-10-27. Avance de código: 2026-10-29. Rama: `feature/multiuser-sources`.
 
 Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
+
+El MVP actual mantiene cuentas por invitación mediante Keycloak. Google/GitHub sigue pendiente por decisión del usuario. El código de S09–S11 incorpora lectura de Jira, selección y procedencia de orígenes y coordinación de pestañas/agentes; su evidencia integrada y publicación se registran por separado, sin dar por validada una conexión Jira real.
 
 ## Resultado esperado
 
@@ -32,7 +34,7 @@ La aplicación usa Jira y Memos como orígenes. No publica ni actualiza document
 4. Recibir una propuesta y comparar automáticamente, con procedencia y momento de lectura visibles.
 5. Sustituir o borrar el trabajo, y desconectar las cuentas externas de forma independiente.
 
-Para la beta se propone Jira **descripción del issue**, con título y referencia como metadatos, y Memos **contenido de la nota**. No se incluyen comentarios, adjuntos, búsqueda avanzada ni exploradores completos. Este recorte es una propuesta de alcance del comité, no una capacidad ya implementada.
+Para la beta se propone Jira **descripción del issue**, con título y referencia como metadatos, y Memos **contenido de la nota**. No se incluyen comentarios, adjuntos, búsqueda avanzada ni exploradores completos. Este recorte conserva el alcance del comité. [S08](memos-source.md) implementa la captura de Memos y [S09](jira-source.md), la descripción de Jira con conversión ADF acotada; una prueba sintética no equivale a autorizar una cuenta real del proveedor.
 
 La base se captura cuando se lee el origen. No cambia silenciosamente durante la revisión. Actualizar el origen será una acción explícita, con protección contra resultados obsoletos. Un fallo de red, de permisos, de conversión o de análisis conserva el trabajo válido anterior.
 
@@ -100,7 +102,9 @@ S02 separó snapshot, mutex y canal SSE por propietario; el modo local conserva 
 
 Se propone una sola instancia de aplicación y SQLite en almacenamiento local persistente. No se colocará el archivo SQLite en un volumen de red compartido entre réplicas. Si aparece la necesidad de varias instancias, habrá que revisar persistencia, sesiones y distribución de eventos; no bastará con aumentar contenedores.
 
-Cada usuario tendrá como máximo un par vigente y sus metadatos. El HTML/diff se puede recalcular. Las conexiones y la admisión son datos separados del trabajo. Reemplazar o borrar el trabajo no revoca por sí solo sus conexiones; desconectar un proveedor no borra silenciosamente la comparación ya capturada.
+Cada usuario conserva como máximo un par vigente y sus metadatos. El esquema SQLite 4 añade tipo y momento de recepción por lado; migra una base de esquema 3 dentro de una transacción sin inventar fechas para trabajos antiguos. Antes de actualizar hay que conservar un checkpoint coherente: el binario anterior no puede abrir una base migrada incompatible.
+
+El HTML/diff se puede recalcular. Las conexiones y la admisión son datos separados del trabajo. Reemplazar o borrar el trabajo no revoca por sí solo sus conexiones; desconectar un proveedor no borra silenciosamente la comparación ya capturada.
 
 Las escrituras del trabajo serán atómicas y usarán una revisión esperada. Una propuesta que llega tarde no puede sobrescribir un trabajo más reciente: devuelve un conflicto comprensible. El borrado, refresco del origen, importación y actualización por agente siguen la misma regla.
 
@@ -124,7 +128,7 @@ Los destinos de proveedores los configura la administración. No se añadirá un
 
 El producto no tendrá tabla de versiones, biblioteca ni historial recuperable. Sustituir un par elimina la versión anterior del estado activo; borrar vacía ese espacio y lo comunica a sus pestañas.
 
-La retención de backups, registros transitorios y SQLite/WAL debe acordarse antes de prometer eliminación definitiva. Se decidirá si el trabajo actual entra en backups y por cuánto tiempo, o si se acepta perderlo ante pérdida del volumen manteniendo recuperación ante reinicios. Las cuentas, conexiones, claves y el IdP tienen su propia política de respaldo. Estas decisiones no están confirmadas todavía.
+El plan original exigió acordar la retención de backups, registros transitorios y SQLite/WAL antes de prometer eliminación definitiva. S14 confirmó hasta siete ejecuciones diarias cifradas; una ejecución manual ocupa también uno de los siete lugares. Su [política de operación](beta-operations.md) distingue trabajo activo y copias e incluye cuentas, conexiones, claves e IdP en la recuperación. Borrar o reemplazar el trabajo no elimina de inmediato su presencia en las copias. Esta decisión no añade un historial funcional.
 
 ## Antes de exponerlo en internet
 
@@ -173,7 +177,19 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 | 3 | S13. Demostrar aislamiento, límites y capacidad de diez usuarios antes de publicar | [#14](https://github.com/joalceco/mddiff/issues/14) |
 | 4 | S14. Desplegar la beta por invitación con respaldo, observabilidad y rollback | [#15](https://github.com/joalceco/mddiff/issues/15) |
 
+### Avance histórico al 2026-10-28
+
 Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. [S14](beta-operations.md) incorpora el despliegue real por invitación, restauración de trabajo/IdP/claves, reinicio y rollback; también se verificó Codex por HTTPS público con dos usuarios sintéticos. Google/GitHub y la lectura de Jira conservan sus historias pendientes.
+
+### MVP actual · 2026-10-29
+
+El código de [S09: Jira Cloud](jira-source.md) obtiene únicamente descripción, título y fecha del issue permitido por la conexión personal. `adf-md-v1` convierte el contenido admitido y conserva datos no representables con avisos explícitos; no se cargan comentarios/adjuntos ni se escriben cambios de negocio.
+
+[S10: selector y procedencia](source-picker.md) integra en las cabeceras texto, archivo, Jira/Memos y entrega del agente. Guarda la captura, muestra referencia, fechas y avisos y ofrece actualización explícita con revisión esperada. La propuesta y los metadatos del lado no editado se conservan. El esquema 4 persiste el tipo y momento de recepción de entradas manuales, API y MCP.
+
+[S11: coordinación](coordination.md) vincula lecturas y SSE a la sesión de cada pestaña y mantiene CAS en el commit. Las pruebas incluyen reconexión, revocación, servidor reiniciado, lecturas lentas y propuestas concurrentes; sus resultados actuales se registran en esa guía. No se añade un sistema distribuido ni colaboración entre usuarios.
+
+El avance de código no certifica despliegue del binario nuevo, OAuth de Jira real ni Google/GitHub. S14 conserva su evidencia histórica de instalación y recuperación; actualizarla al esquema 4 requiere checkpoint, pruebas y registro operativo propios. Las credenciales y los documentos de una lectura consentida permanecen fuera del repositorio.
 
 ## Fuera de esta beta
 

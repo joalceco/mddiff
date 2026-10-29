@@ -100,7 +100,7 @@ def failed(browser, provider, body, expected, events, before_network=False, head
 
 def inspect(data, provider, runtime, expected):
     with closing(sqlite3.connect(data / "work.sqlite3")) as connection:
-        check(connection.execute("PRAGMA user_version").fetchone()[0] == 3, "Memos provenance did not migrate storage to schema 3.")
+        check(connection.execute("PRAGMA user_version").fetchone()[0] == 4, "Memos provenance and input metadata did not migrate storage to schema 4.")
         rows = connection.execute("SELECT subject, revision, base_markdown, candidate_markdown, base_source FROM current_work").fetchall()
     check(len(rows) == 2, "Captures created history rows or lost a private owner.")
     owners = {user["id"]: name for name, user in runtime["users"].items()}

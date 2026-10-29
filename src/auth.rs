@@ -369,6 +369,10 @@ impl Authenticator {
         .unwrap()
     }
 
+    pub(crate) async fn session_marker(&self, handle: &SessionHandle) -> Result<String, AppError> {
+        Ok(self.local_session(handle).await?.csrf.secret().clone())
+    }
+
     async fn local_session(&self, handle: &SessionHandle) -> Result<Arc<Session>, AppError> {
         let mut sessions = self.sessions.lock().await;
         sessions.retain(|_, s| s.expires > Instant::now());
@@ -637,9 +641,21 @@ pub async fn authenticate(
     let checked = async {
         let handle = auth.handle(&headers)?;
         let identity = auth.revalidate(&handle).await?;
-        if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        if headers.contains_key("x-csrf-token")
+            || !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
+        {
             let session = auth.local_session(&handle).await?;
-            auth.csrf(&headers, &session)?;
+            if !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+                auth.csrf(&headers, &session)?;
+            } else if headers.get_all("x-csrf-token").iter().count() != 1
+                || headers.get("x-csrf-token").and_then(|v| v.to_str().ok())
+                    != Some(session.csrf.secret())
+            {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "La sesión cambió. Vuelve a entrar.",
+                ));
+            }
         }
         Ok::<_, AppError>((handle, identity))
     }

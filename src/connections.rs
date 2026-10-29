@@ -857,7 +857,7 @@ mod tests {
                 .database_for_test()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 
