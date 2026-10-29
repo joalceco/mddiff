@@ -2,6 +2,8 @@
 
 Fecha: 2026-10-29. Issue: [#12](https://github.com/joalceco/mddiff/issues/12). Rama: `feature/multiuser-sources`.
 
+Estado: #12 cerrado. El código está desplegado en la beta con el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` y SQLite 4. La [evidencia operativa](beta-operations.md#actualización-del-2026-10-29) registra la recuperación del trabajo nuevo y el recorrido real de Codex sobre esa imagen publicada.
+
 La coordinación conserva un único trabajo por identidad verificada. API, MCP y pestañas propias comparten su revisión; una solicitud atrasada recibe `409` y no reemplaza el trabajo vigente. Los canales SSE pertenecen al mismo propietario que el contenido. Esta entrega no añade colaboración entre usuarios ni un historial de eventos.
 
 ## Contrato de coordinación
@@ -52,6 +54,8 @@ La prueba solo admite el issuer y las direcciones de loopback de la fixture. No 
 
 ## Estado de verificación
 
-La revisión estática y las comprobaciones de sintaxis de los runners nuevos pasaron. El 2026-10-29, la ejecución integrada de S11 aprobó las pruebas de coordinación y el recorrido real de Chrome, incluida la secuencia Alice → Bob → Alice. La corrida final local repitió el recorrido y comprobó que una propuesta MCP registra el origen `agent`. También pasaron autenticación, persistencia, API/MCP, conexiones y Memos, además del cliente Codex real con dos identidades y cero turnos de modelo. Esta evidencia no acredita una ejecución nueva de CI ni la publicación de esta entrega.
+La revisión estática y las comprobaciones de sintaxis de los runners nuevos pasaron. El 2026-10-29, la ejecución integrada de S11 aprobó las pruebas de coordinación y el recorrido real de Chrome, incluida la secuencia Alice → Bob → Alice. La corrida final local repitió el recorrido y comprobó que una propuesta MCP registra el origen `agent`. También pasaron autenticación, persistencia, API/MCP, conexiones y Memos con proveedores sintéticos, además del cliente Codex real con dos identidades y cero turnos de modelo.
 
-La base previa, anterior a estos cambios, aprobó los jobs `check` y `container` de [CI](https://github.com/joalceco/mddiff/actions/runs/40779128838). Sus resultados no se atribuyen a los runners ni al vínculo de sesión añadidos en S11.
+La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó `check` y `container`: 70 pruebas Rust, regresiones, coordinación y capacidad de diez usuarios sintéticos. Codex real también completó OAuth y el recorrido API/MCP por HTTPS público sobre la imagen publicada `6bfccea`, con dos cuentas y cero turnos de modelo. El recorrido verificó procedencia, SSE y conflictos de revisión. La recuperación del trabajo nuevo y sus metadatos también pasó; después se retiraron sus documentos y las tres cuentas sintéticas creadas, sin modificar al propietario.
+
+Como antecedente, la base previa aprobó los jobs `check` y `container` de [CI 40779128838](https://github.com/joalceco/mddiff/actions/runs/40779128838). Esa corrida histórica no se atribuye a los runners ni al vínculo de sesión añadidos en S11. Ninguna de estas comprobaciones acredita login Google/GitHub ni una lectura real de Jira o Memos.

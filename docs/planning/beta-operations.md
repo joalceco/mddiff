@@ -22,6 +22,8 @@ Para admitir a una persona:
 
 Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. En la instalación del 2026-10-28, la lectura de Jira y Google/GitHub conservaron sus historias pendientes. [S09](jira-source.md) registra el avance posterior de Jira; Google/GitHub sigue pendiente.
 
+Al 2026-10-29, Jira aún no tiene una lectura real verificada: falta configurar un secreto OAuth válido del operador. La cuenta propietaria puede probar la aplicación privada; autorizar otras cuentas requiere **Sharing**, que permanece deshabilitado por [#17](https://github.com/joalceco/mddiff/issues/17). La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. No se ha emitido esa atestación ni se considera resuelto el requisito mediante este runbook.
+
 ## Trabajo actual y siete copias diarias
 
 La aplicación mantiene únicamente el último original y la última propuesta por persona. **La instalación beta conserva hasta siete copias diarias exitosas cifradas.** Una copia puede recuperar documentos reemplazados o borrados después de su captura; borrar el trabajo actual no elimina de inmediato esas copias. El timer crea una copia al día; una ejecución manual también ocupa uno de los siete lugares. Si se omiten días por un fallo, una copia recuperable puede tener más de siete días.
@@ -46,7 +48,9 @@ Para una restauración, cierra primero el acceso y conserva el estado existente.
 
 El manifiesto de la entrega fija commit, identidad de imagen y esquema SQLite. Antes de actualizar, conserva la imagen conocida y un checkpoint coherente. Un despliegue fallido debe poder volver a esa imagen y su configuración sin borrar el directorio de trabajo.
 
-El ensayo del 2026-10-28 recuperó la imagen verificada tras un candidato que no arranca, con almacenamiento de esquema 3. No demostró un downgrade entre esquemas. El código actual usa el esquema 4; el binario anterior no puede abrir sus datos migrados. Si una actualización requiere restaurar un checkpoint, ese procedimiento vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones para evitar ese intervalo.
+El ensayo del 2026-10-28 recuperó la imagen verificada tras un candidato que no arranca, con almacenamiento de esquema 3. No demostró un cambio entre esquemas. El ensayo del 2026-10-29 migró de 3 a 4, restauró únicamente la aplicación y su checkpoint compatible con 3 y repitió la migración a 4, preservando IdP y PostgreSQL. Esto no es una conversión de 4 a 3 en el mismo archivo ni admite reducir manualmente `user_version`.
+
+El binario anterior no puede abrir los datos migrados a 4. Restaurar un checkpoint vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones. Después de reabrir el servicio y aceptar escrituras públicas, no recuperes el checkpoint anterior como un rollback rutinario: perdería esas escrituras.
 
 Un rollback limitado al visor debe conservar el IdP y su PostgreSQL vigentes. Restaurarlos desde una copia anterior podría revertir cambios de contraseña o sesiones que ocurrieron durante el mantenimiento de la aplicación. Una recuperación completa del IdP exige cerrar también sus escrituras y revisar esa consecuencia.
 
@@ -64,6 +68,8 @@ Un dashboard privado reúne estas señales. No se configuraron envíos de alerta
 
 ## Evidencia de instalación
 
+### Instalación histórica del 2026-10-28
+
 Verificado el **2026-10-28** en Linux amd64, con la aplicación del commit `2dcede7` y esquema SQLite 3. La instalación y las credenciales permanecen en el runbook privado; no se incorporaron al repo ni a la imagen.
 
 | Comprobación | Resultado |
@@ -76,4 +82,20 @@ Verificado el **2026-10-28** en Linux amd64, con la aplicación del commit `2dce
 
 El respaldo coherente completo medido tardó aproximadamente **25 segundos**, incluidos reinicio y verificación; no es una garantía para volúmenes mayores. La primera ejecución detectó una conexión SQLite sin cerrar: se corrigió antes de publicar, y los respaldos y la restauración posteriores pasaron.
 
-Las suites de código y capacidad previas están en [S13](capacity-validation.md); sus diez sesiones sintéticas no equivalen a una prueba prolongada de diez navegadores a través de internet. Esta entrega no cambia el motor Rust ni el visor local. No valida login social, proveedores personales reales, alta disponibilidad ni un downgrade entre esquemas.
+Las suites de código y capacidad previas están en [S13](capacity-validation.md); sus diez sesiones sintéticas no equivalen a una prueba prolongada de diez navegadores a través de internet. La evidencia del 2026-10-28 no valida login social, proveedores personales reales, alta disponibilidad ni cambios entre esquemas.
+
+### Actualización del 2026-10-29
+
+La beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070`, con esquema SQLite 4. Esta actualización incorpora el selector y la procedencia de orígenes, la conversión ADF de Jira y el vínculo entre sesión y eventos de [S11](coordination.md). [#11](https://github.com/joalceco/mddiff/issues/11) y [#12](https://github.com/joalceco/mddiff/issues/12) están cerrados.
+
+| Comprobación | Resultado registrado |
+| --- | --- |
+| CI | [Corrida 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796): jobs `check` y `container` correctos, incluidas 70 pruebas Rust, regresiones y capacidad de diez usuarios sintéticos. |
+| Migración y rollback | SQLite 3→4, rollback de aplicación a su checkpoint de esquema 3 y nueva migración a 4 correctos. Los hashes de los registros anteriores coinciden. Keycloak y PostgreSQL permanecieron vigentes durante el ensayo. |
+| Cliente público | Codex real completó OAuth, API/MCP, procedencia, SSE y conflictos de revisión por HTTPS público con dos cuentas sintéticas y cero turnos de modelo sobre la imagen publicada `6bfccea`. |
+| Operación | Cinco sondas públicas correctas, métricas comprobadas y timer de respaldos activo. Se conserva la política de hasta siete copias cifradas exitosas. |
+| Persistencia nueva | Recuperación del trabajo nuevo y sus metadatos verificada en `6bfccea`. La conservación de registros previos durante la migración también está verificada. |
+
+La limpieza posterior borró los documentos sintéticos y retiró únicamente las tres cuentas creadas para esta prueba; el propietario permaneció intacto. El respaldo final cifrado se recuperó desde restic y se verificaron manifiesto, commit, imagen, esquema 4 e integridad SQLite. Se retiraron las copias temporales del checkpoint; las copias cifradas y los datos vigentes se conservaron. El monitor confirmó las cinco sondas HTTPS y la recolección de métricas con muestras actuales.
+
+La lectura real de [Jira #10](https://github.com/joalceco/mddiff/issues/10), la integración personal real de Memos y Google/GitHub siguen pendientes. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar Sharing para otras cuentas de Atlassian. Los resultados de proveedores sintéticos no sustituyen esas validaciones, y la documentación pública no contiene accesos, secretos ni documentos privados.

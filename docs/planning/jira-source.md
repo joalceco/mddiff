@@ -2,6 +2,8 @@
 
 Issue: [#10](https://github.com/joalceco/mddiff/issues/10). La captura usa la conexión personal Jira Cloud existente, no una credencial compartida entre usuarios.
 
+Estado al **2026-10-29**: el código está desplegado con SQLite 4 y las pruebas sintéticas pasan; #10 sigue abierto porque aún no se ha verificado una lectura real de Jira. Falta un secreto OAuth válido configurado por el operador. La autorización para otras cuentas de Atlassian está bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17); **Sharing** permanece deshabilitado.
+
 ## Resultado y alcance
 
 Una persona autenticada abre un issue por clave o por una URL `/browse/CLAVE` del sitio autorizado. El backend obtiene únicamente `summary`, `description` y `updated` mediante Jira REST API v3 y convierte la descripción ADF a una representación Markdown verificable. El título y la referencia quedan como metadatos; no se incorporan al cuerpo de la descripción.
@@ -93,7 +95,15 @@ Las pruebas definen resultados concretos de Markdown para párrafos, marcas, lis
 
 Las pruebas sintéticas no acreditan una conexión personal real a Jira Cloud. Una lectura consentida requiere configurar el cliente OAuth y el sitio autorizados y completar la autorización personal; no se incorporan credenciales ni documentos reales a estas fixtures.
 
-Verificado el 2026-10-29: pasan los seis tests unitarios de conversión ADF, la suite Rust completa, Clippy, la compilación `release` y la integración `scripts/test_jira_source.py` con Keycloak y proveedor sintéticos. La corrida final incluye marcas contiguas renderizadas, rechazo de complejidad sin cambiar el trabajo, renovación de credenciales, desconexión y cierre de sesión durante una captura, preservación de la propuesta y recuperación tras reiniciar. La lectura real y la validación del contenedor de esta entrega siguen pendientes.
+Verificado el 2026-10-29: pasan los seis tests unitarios de conversión ADF, la suite Rust completa, Clippy, la compilación `release` y la integración `scripts/test_jira_source.py` con Keycloak y proveedor sintéticos. La corrida final incluye marcas contiguas renderizadas, rechazo de complejidad sin cambiar el trabajo, renovación de credenciales, desconexión y cierre de sesión durante una captura, preservación de la propuesta y recuperación tras reiniciar. La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó `check` y `container`, incluidas 70 pruebas Rust, regresiones y diez usuarios sintéticos.
+
+El commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` está desplegado con SQLite 4. La [evidencia operativa](beta-operations.md#actualización-del-2026-10-29) registra migración y rollback, cliente Codex público y los límites de cada comprobación. Ninguno de esos resultados acredita la lectura real de Jira.
+
+## Validación real pendiente y distribución
+
+Una vez configurado el secreto privado válido, la cuenta propietaria de la aplicación 3LO puede consentir una prueba sin habilitar Sharing. El código no exige distribuir la aplicación para esa prueba. No se ha registrado aún un consentimiento o una lectura reales.
+
+La consola de Atlassian exige una atestación sobre **Personal Data Reporting API** para aplicaciones que almacenan datos personales antes de habilitar Sharing. Esa API no está implementada en mddiff. [#17](https://github.com/joalceco/mddiff/issues/17) conserva este bloqueo; no se ha emitido la atestación ni se habilita autorización para otras cuentas. Consulta [la configuración de consentimiento](personal-connections.md#consentimiento-de-jira-cloud) para separar la aplicación privada de su distribución.
 
 ## Fuentes primarias
 

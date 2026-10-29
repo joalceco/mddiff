@@ -4,13 +4,15 @@ Fecha: 2026-10-27. Issue: [#8](https://github.com/joalceco/mddiff/issues/8). Ram
 
 Este documento registra S07. La entrega posterior [S08: captura de Memos](memos-source.md) permite abrir una nota como original con estas conexiones y añade el esquema SQLite 3 para su procedencia.
 
+Estado al **2026-10-29**: la beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` con SQLite 4 y conexiones cifradas conservadas tras la migración. Las pruebas de proveedores siguen siendo sintéticas. Jira real requiere un secreto OAuth válido del operador; [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar Sharing para otras cuentas de Atlassian. Google/GitHub y una integración personal real de Memos siguen pendientes.
+
 ## Resultado y alcance
 
 Cada persona autenticada puede conectar, comprobar y desconectar sus propias cuentas desde **Conexiones**, junto a **Cerrar sesión**. Administración define los destinos disponibles; el usuario no introduce URLs. La conexión pertenece a la identidad verificada `issuer` + `sub`, igual que el trabajo actual.
 
 Jira Cloud utiliza consentimiento personal OAuth 2.0 (3LO). Memos utiliza un token personal y el contrato de **Memos 0.31.0**, con `GET /api/v1/auth/me` para comprobarlo. La API 26.10 cambia las rutas y no se admite mediante detección automática o fallback.
 
-Esta entrega administra conexiones. Abrir notas de Memos o descripciones de Jira como original pertenece a #9 y #10. Desconectar conserva el último original y propuesta. Google/GitHub y el despliegue público siguen pendientes.
+S07 administra conexiones. [S08](memos-source.md) y [S09](jira-source.md) incorporan la captura de notas y descripciones como original. Desconectar conserva el último original y propuesta. El despliegue público se registra por separado en [la operación de la beta](beta-operations.md); no demuestra una conexión personal real a esos proveedores.
 
 ## Preparar la configuración privada
 
@@ -70,7 +72,9 @@ Cada petición fija sus resultados DNS comprobados, desactiva proxies del entorn
 
 ## Consentimiento de Jira Cloud
 
-Administración registra una aplicación 3LO de mddiff en Atlassian; cada usuario concede acceso a esa aplicación con su propia cuenta. No se pide un API token de Jira ni un secreto de aplicación a cada usuario. Elige acceso **Resource-level** para limitar el consentimiento al sitio seleccionado. La aplicación es privada por defecto: habilitar **Sharing** permite que otras personas autoricen sus propias conexiones; no concede acceso a sus datos automáticamente ni publica la aplicación en Marketplace.
+Administración registra una aplicación 3LO de mddiff en Atlassian; cada usuario concede acceso a esa aplicación con su propia cuenta. No se pide un API token de Jira ni un secreto de aplicación a cada usuario. Elige acceso **Resource-level** para limitar el consentimiento al sitio seleccionado. La aplicación es privada por defecto; su propietario puede probarla con su propia cuenta una vez configurado el secreto OAuth válido.
+
+**Sharing permanece deshabilitado.** La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea autorizar otras cuentas de Atlassian. No se ha emitido esa atestación. Habilitar Sharing en una entrega futura permitiría que otras personas autoricen sus conexiones; no les concedería acceso automático a datos de otros usuarios ni publicaría la aplicación en Marketplace.
 
 1. Registra exactamente `https://review.example/connections/jira/callback` usando el origen público real de mddiff.
 2. Añade el scope clásico `read:jira-work`. El flujo solicita además `offline_access` para renovar el acceso. No añadas permisos de escritura para este conector.
@@ -106,7 +110,7 @@ La biblioteca `ring` cifra las credenciales con AES-256-GCM y un nonce aleatorio
 
 La clave externa requiere un archivo regular `0600`, sin enlace simbólico y de 32 bytes exactos, fuera del directorio de datos. Se mantiene en memoria durante el proceso; no se copia a SQLite. Las credenciales tampoco se exponen mediante MCP, la API de propuestas, logs o las respuestas de conexiones. Los administradores con acceso al proceso y a la clave conservan acceso a los secretos; este cifrado protege el almacenamiento, no un host comprometido.
 
-El esquema SQLite 2 añade `encrypted_connections` y conserva `current_work`. La migración desde el esquema 1 es transaccional. Un binario anterior a esta entrega rechaza el esquema 2: prepara una copia coherente antes de actualizar si necesitas rollback.
+S07 incorporó el esquema SQLite 2 para `encrypted_connections`, conservando `current_work` mediante una migración transaccional desde 1. El almacenamiento actual usa el esquema 4, que añade procedencia opcional sin reemplazar las conexiones cifradas. El ensayo real del 2026-10-29 verificó 3→4, rollback de la aplicación desde un checkpoint compatible con 3 y nueva migración a 4, con hashes de los registros previos idénticos e IdP/PostgreSQL conservados. Un binario antiguo no puede abrir un esquema incompatible; no reduzcas manualmente `user_version`. Consulta [la recuperación y sus límites](beta-operations.md#restauración-y-rollback).
 
 **Desconectar** pone nonce y ciphertext en NULL e incrementa la generación. El registro vacío impide reutilizar una revisión antigua; no conserva el token recuperable. No borra el trabajo capturado ni llama a escrituras del proveedor. Para revocar también en origen, elimina el token en Memos o retira el acceso de mddiff en las aplicaciones conectadas de Atlassian. No se inventa un endpoint de revocación 3LO.
 
@@ -144,9 +148,9 @@ node tests/browser/connections.mjs
 
 En un equipo con Chrome instalado puedes usar `MDDIFF_BROWSER_CHANNEL=chrome`. GitHub Actions incorpora ambos runners. La suite de proveedores audita métodos, rutas y principal de cada solicitud de negocio: permite GET de comprobación y POST de OAuth, sin escrituras de documentos.
 
-La validación registrada utiliza usuarios y proveedores sintéticos; no acredita consentimiento con cuentas reales de Jira o Memos, ni login social ni un despliegue del cluster. Para activar un proveedor real hacen falta la aplicación OAuth de administración, los destinos aprobados y el consentimiento o token personal de cada usuario.
+La validación de los conectores utiliza usuarios y proveedores sintéticos; no acredita consentimiento con cuentas reales de Jira o Memos ni login social. El despliegue del visor sí está registrado en [S14](beta-operations.md#actualización-del-2026-10-29), como evidencia separada. Para probar Jira real falta un secreto OAuth válido del operador y el consentimiento de la cuenta propietaria; distribuir la autorización a otras cuentas conserva el bloqueo de #17.
 
-### Evidencia del 2026-10-27
+### Evidencia histórica del 2026-10-27
 
 Las 46 pruebas Rust, formato, Clippy y compilación `release` terminaron correctamente. Pasaron la integración de conexiones y la prueba de contrato en Chrome; también las regresiones de login, persistencia, importación de Markdown, modos y MCP local/remoto.
 
@@ -159,3 +163,7 @@ Las 46 pruebas Rust, formato, Clippy y compilación `release` terminaron correct
 | Pantalla | Aviso y aceptación de alcance, limpieza de token, foco/Escape, móvil, errores, logout y respuestas de cuentas anteriores. |
 
 La auditoría saliente permitió únicamente GET de comprobación y POST de OAuth. GitHub Actions incluye ambas suites nuevas; esta evidencia corresponde a ejecuciones locales, sin atribuir una corrida remota de CI.
+
+### Evidencia del 2026-10-29
+
+La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó `check` y `container`, con 70 pruebas Rust, regresiones de conexiones y capacidad de diez usuarios sintéticos. La beta desplegada usa SQLite 4; sus métricas y cinco sondas públicas pasaron y el timer de respaldos está activo. Sobre la imagen publicada `6bfccea` se verificaron la recuperación del trabajo nuevo y el recorrido real de Codex por HTTPS público con dos cuentas y cero turnos de modelo. No se atribuye a esta evidencia una lectura real de Jira o Memos.

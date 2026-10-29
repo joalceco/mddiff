@@ -1,10 +1,10 @@
 # Beta alojada: cuentas y orígenes
 
-Fecha original: 2026-10-27. Avance de código: 2026-10-29. Rama: `feature/multiuser-sources`.
+Fecha original: 2026-10-27. Estado de código y despliegue: 2026-10-29. Rama: `feature/multiuser-sources`.
 
 Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
 
-El MVP actual mantiene cuentas por invitación mediante Keycloak. Google/GitHub sigue pendiente por decisión del usuario. El código de S09–S11 incorpora lectura de Jira, selección y procedencia de orígenes y coordinación de pestañas/agentes; su evidencia integrada y publicación se registran por separado, sin dar por validada una conexión Jira real.
+El MVP actual mantiene cuentas por invitación mediante Keycloak. Google/GitHub sigue pendiente por decisión del usuario. La beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` con SQLite 4. S10 y S11 están cerradas; S09 conserva pendiente la lectura real de Jira. La [evidencia operativa](beta-operations.md#actualización-del-2026-10-29) distingue CI, cliente público y comprobaciones que siguen en curso.
 
 ## Resultado esperado
 
@@ -189,7 +189,11 @@ El código de [S09: Jira Cloud](jira-source.md) obtiene únicamente descripción
 
 [S11: coordinación](coordination.md) vincula lecturas y SSE a la sesión de cada pestaña y mantiene CAS en el commit. Las pruebas incluyen reconexión, revocación, servidor reiniciado, lecturas lentas y propuestas concurrentes; sus resultados actuales se registran en esa guía. No se añade un sistema distribuido ni colaboración entre usuarios.
 
-El avance de código no certifica despliegue del binario nuevo, OAuth de Jira real ni Google/GitHub. S14 conserva su evidencia histórica de instalación y recuperación; actualizarla al esquema 4 requiere checkpoint, pruebas y registro operativo propios. Las credenciales y los documentos de una lectura consentida permanecen fuera del repositorio.
+La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó `check` y `container`, con 70 pruebas Rust, regresiones y capacidad de diez usuarios sintéticos. [#11](https://github.com/joalceco/mddiff/issues/11) y [#12](https://github.com/joalceco/mddiff/issues/12) están cerrados. Codex real completó el recorrido por HTTPS público con dos cuentas y cero turnos de modelo sobre la imagen publicada `6bfccea`, incluyendo procedencia, SSE y conflictos de revisión.
+
+La actualización del 2026-10-29 migró SQLite 3→4, ensayó un rollback de la aplicación a esquema 3 desde su checkpoint y repitió la migración a 4. Los hashes de los registros previos coincidieron y se conservaron Keycloak y PostgreSQL. Pasaron cinco sondas públicas, las métricas y la recuperación del trabajo nuevo con su procedencia; el timer de respaldos está activo. Se borraron los documentos y las tres cuentas sintéticas creadas para la prueba, sin modificar al propietario. El respaldo cifrado final del esquema 4 se recuperó y verificó; se retiró el staging temporal. Consulta [S14](beta-operations.md#actualización-del-2026-10-29) para la evidencia operativa.
+
+[#10](https://github.com/joalceco/mddiff/issues/10) sigue pendiente de una lectura consentida con un secreto OAuth válido del operador. Una prueba con la cuenta propietaria de la aplicación privada es posible sin habilitar distribución. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar **Sharing** para otras cuentas de Atlassian: la consola exige una atestación sobre Personal Data Reporting API para almacenar datos personales y la API aún no está implementada. Sharing permanece deshabilitado. No se acredita Jira/Memos reales ni Google/GitHub; credenciales y documentos consentidos permanecen fuera del repositorio.
 
 ## Fuera de esta beta
 

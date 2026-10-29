@@ -8,6 +8,8 @@ mddiff es una herramienta local para revisar documentos y propuestas de una IA. 
 
 El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado integra cuentas por invitación con Keycloak, espacios privados, orígenes Jira/Memos y MCP remoto. Google/GitHub sigue pendiente.
 
+Estado al **2026-10-29**: la beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` con SQLite 4. Pasaron CI, la prueba sintética de diez usuarios y, sobre la imagen publicada, la recuperación del trabajo y un recorrido real de Codex por HTTPS público con dos cuentas y cero turnos de modelo. Jira real sigue pendiente y su autorización para otras cuentas de Atlassian está bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17). Consulta [la evidencia y sus límites](docs/planning/beta-operations.md#actualización-del-2026-10-29).
+
 **Ir a:** [Inicio rápido](#inicio-rápido) · [Contenedor](#ejecutar-hosted-en-un-contenedor) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
 ## Qué incluye
@@ -135,7 +137,7 @@ El repositorio incluye un Dockerfile con bases fijadas por digest y Compose para
 
 `deploy/compose.yaml` no publica puertos del host. Para un proxy en el host, `deploy/compose.loopback.yaml` publica solo `127.0.0.1:3847`; el proxy termina HTTPS y conserva el origen canónico. `GET` y `HEAD /healthz` permiten comprobar preparación sin documentos ni credenciales. Salud no comprueba continuamente la disponibilidad del IdP.
 
-Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. La [operación de la beta por invitación](docs/planning/beta-operations.md) conserva la evidencia del despliegue anterior, respaldo cifrado, restauración, observabilidad y rollback. Esa evidencia histórica no demuestra que los cambios actuales ya estén publicados. La configuración real de infraestructura permanece fuera del repositorio.
+Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](docs/planning/container-deployment.md). El [informe de aislamiento y capacidad](docs/planning/capacity-validation.md) registra cuotas y una prueba sintética de diez sesiones. La [operación de la beta por invitación](docs/planning/beta-operations.md) distingue la instalación histórica del 2026-10-28 y la actualización desplegada el 2026-10-29, con respaldo cifrado, migración, observabilidad y ensayo de rollback. La configuración real de infraestructura permanece fuera del repositorio.
 
 ## Usar el visor
 
@@ -144,6 +146,8 @@ Sigue [la preparación de datos, secretos, proxy, arranque y comprobaciones](doc
 Administración habilita destinos con `--connections-config` y una clave externa de 32 bytes para cifrar las credenciales. Desde **Conexiones**, junto a **Cerrar sesión**, cada usuario puede conectar, comprobar y desconectar sus cuentas. Jira solicita consentimiento OAuth de lectura; Memos 0.31 utiliza un token personal con un aviso explícito sobre su alcance. Desconectar conserva el trabajo actual.
 
 Las credenciales se cifran con AES-256-GCM y no se devuelven al navegador o MCP. El conector solo hace lecturas de negocio. El token de Memos puede permitir cambios fuera de mddiff; desconectar elimina su copia local y la revocación en el proveedor se realiza por separado. Consulta [la configuración, límites y pruebas de conexiones personales](docs/planning/personal-connections.md).
+
+La lectura real de Jira aún requiere un secreto OAuth válido configurado por administración; el destino de la beta permanece deshabilitado hasta tenerlo. **Sharing** permanece deshabilitado: la consola de Atlassian exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar la autorización para otras cuentas; una prueba con la cuenta propietaria de la aplicación privada puede realizarse por separado. Este estado no acredita una conexión OAuth completada ni una lectura real de Jira o Memos.
 
 En modo local, abre documentos mediante sus rutas:
 
@@ -471,7 +475,7 @@ Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_
 
 GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`.
 
-La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos y la evidencia local del 2026-10-27](docs/planning/remote-agents.md#reproducir-la-verificación); no se atribuye una corrida remota de CI.
+La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos de la fixture](docs/planning/remote-agents.md#reproducir-la-verificación) y [la evidencia del cliente real por HTTPS público](docs/planning/beta-operations.md#actualización-del-2026-10-29).
 
 Las conexiones personales se verifican con `python3 scripts/test_connections.py` y proveedores sintéticos auditados; la pantalla tiene una prueba de contrato en `node tests/browser/connections.mjs`. La [guía de conexiones](docs/planning/personal-connections.md#reproducir-las-pruebas) describe requisitos y límites. No se ha validado el consentimiento con cuentas reales de Jira/Memos.
 
@@ -479,7 +483,7 @@ La captura de notas utiliza `python3 scripts/test_memos_source.py` con notas sin
 
 La descripción de Jira tiene fixtures y un runner en `python3 scripts/test_jira_source.py`, además de las pruebas Rust del conversor ADF. El selector se comprueba con `node tests/browser/sources.mjs`; la coordinación con `python3 scripts/test_coordination.py`, que incluye navegador real y carreras controladas. Ejecuta de forma secuencial las integraciones que comparten la fixture Keycloak. Estos contratos sintéticos no acreditan OAuth ni una lectura con una cuenta Jira real. Consulta [Jira](docs/planning/jira-source.md), [orígenes](docs/planning/source-picker.md) y [coordinación](docs/planning/coordination.md) para el estado y alcance de cada comprobación.
 
-El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. Consulta [el procedimiento y el estado de su evidencia](docs/planning/container-deployment.md#verificar-el-empaquetado); su existencia no demuestra publicación. La opción `--capacity` comprueba diez sesiones y guarda un informe agregado privado; consulta [el método, las cuotas y los límites de esa medición](docs/planning/capacity-validation.md).
+El empaquetado tiene una construcción de imagen y el runner `python3 scripts/test_container.py`, con Docker y la fixture Keycloak. La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó ambos jobs, `check` y `container`: 70 pruebas Rust, regresiones y capacidad de diez usuarios sintéticos. La opción `--capacity` guarda un informe agregado privado; consulta [el método, las cuotas y los límites de esa medición](docs/planning/capacity-validation.md). La [evidencia operativa](docs/planning/beta-operations.md#actualización-del-2026-10-29) registra por separado el despliegue y las comprobaciones públicas.
 
 ### Pruebas de importación en navegador
 
@@ -515,7 +519,7 @@ Node.js 20 o posterior con npm y Chromium se necesitan únicamente para las prue
    python3 scripts/test_hosted_imports.py
    ```
 
-Retira la fixture al terminar con `python3 spikes/identity/keycloak.py down`. Consulta [el procedimiento y los resultados locales](docs/planning/manual-imports.md#comprobar-con-un-navegador-real). La suite se verificó con Chrome y Playwright 1.62.1; Chromium está configurado para CI y no se afirma una corrida remota.
+Retira la fixture al terminar con `python3 spikes/identity/keycloak.py down`. Consulta [el procedimiento y los resultados locales](docs/planning/manual-imports.md#comprobar-con-un-navegador-real). La suite se verificó con Chrome y Playwright 1.62.1; la corrida de CI citada también aprobó las regresiones de navegador con Chromium.
 
 Los cambios en `web/` requieren volver a compilar y reiniciar el servidor, porque los recursos se incorporan al binario. No hay un servidor de desarrollo JavaScript separado.
 
