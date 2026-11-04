@@ -4,7 +4,7 @@ Fecha: 2026-10-27. Issue: [#8](https://github.com/joalceco/mddiff/issues/8). Ram
 
 Este documento registra S07. La entrega posterior [S08: captura de Memos](memos-source.md) permite abrir una nota como original con estas conexiones y añade el esquema SQLite 3 para su procedencia.
 
-Estado al **2026-10-29**: la beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` con SQLite 4 y conexiones cifradas conservadas tras la migración. Las pruebas de proveedores siguen siendo sintéticas. Jira real requiere un secreto OAuth válido del operador; [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar Sharing para otras cuentas de Atlassian. Google/GitHub y una integración personal real de Memos siguen pendientes.
+Estado al **2026-11-04**: la beta mantiene Keycloak por invitación, el binario `6bfccea` y SQLite 4. S09–S11 tienen implementación y verificación; la conexión Jira real con la cuenta propietaria y su comparación por Codex/MCP pasaron. La distribución a otras cuentas Atlassian continúa bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17). Google/GitHub y Memos personal real siguen pendientes.
 
 ## Resultado y alcance
 
@@ -148,7 +148,7 @@ node tests/browser/connections.mjs
 
 En un equipo con Chrome instalado puedes usar `MDDIFF_BROWSER_CHANNEL=chrome`. GitHub Actions incorpora ambos runners. La suite de proveedores audita métodos, rutas y principal de cada solicitud de negocio: permite GET de comprobación y POST de OAuth, sin escrituras de documentos.
 
-La validación de los conectores utiliza usuarios y proveedores sintéticos; no acredita consentimiento con cuentas reales de Jira o Memos ni login social. El despliegue del visor sí está registrado en [S14](beta-operations.md#actualización-del-2026-10-29), como evidencia separada. Para probar Jira real falta un secreto OAuth válido del operador y el consentimiento de la cuenta propietaria; distribuir la autorización a otras cuentas conserva el bloqueo de #17.
+Las fixtures de conectores utilizan usuarios y proveedores sintéticos; por sí solas no acreditan cuentas reales ni login social. La lectura Jira real del 2026-11-04 se registra al final de esta guía. El despliegue del visor está documentado por separado en [S14](beta-operations.md). Distribuir la autorización a otras cuentas Atlassian conserva el bloqueo de #17; Memos personal real sigue sin validarse.
 
 ### Evidencia histórica del 2026-10-27
 
@@ -167,3 +167,7 @@ La auditoría saliente permitió únicamente GET de comprobación y POST de OAut
 ### Evidencia del 2026-10-29
 
 La [corrida de CI 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796) aprobó `check` y `container`, con 70 pruebas Rust, regresiones de conexiones y capacidad de diez usuarios sintéticos. La beta desplegada usa SQLite 4; sus métricas y cinco sondas públicas pasaron y el timer de respaldos está activo. Sobre la imagen publicada `6bfccea` se verificaron la recuperación del trabajo nuevo y el recorrido real de Codex por HTTPS público con dos cuentas y cero turnos de modelo. No se atribuye a esta evidencia una lectura real de Jira o Memos.
+
+## Validación Jira del 2026-11-04
+
+La prueba OAuth y lectura Jira con la cuenta propietaria de la app pasó, incluida propuesta por Codex/MCP, preservación del original y su procedencia, aislamiento y conflicto de revisión. Se retiraron los datos, credencial y cuentas de prueba sin modificar el trabajo del propietario. [Evidencia y alcance](jira-source.md#validación-real-y-distribución). Sharing sigue deshabilitado; #17 no se considera terminado. Los apartados fechados en octubre conservan sus resultados históricos.

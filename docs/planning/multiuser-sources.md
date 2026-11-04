@@ -4,7 +4,7 @@ Fecha original: 2026-10-27. Estado de código y despliegue: 2026-10-29. Rama: `f
 
 Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
 
-El MVP actual mantiene cuentas por invitación mediante Keycloak. Google/GitHub sigue pendiente por decisión del usuario. La beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` con SQLite 4. S10 y S11 están cerradas; S09 conserva pendiente la lectura real de Jira. La [evidencia operativa](beta-operations.md#actualización-del-2026-10-29) distingue CI, cliente público y comprobaciones que siguen en curso.
+Estado al **2026-11-04**: la beta mantiene Keycloak por invitación, el binario `6bfccea` y SQLite 4. S09–S11 tienen implementación y verificación; la conexión Jira real con la cuenta propietaria y su comparación por Codex/MCP pasaron. La distribución a otras cuentas Atlassian continúa bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17). Google/GitHub y Memos personal real siguen pendientes.
 
 ## Resultado esperado
 
@@ -181,7 +181,7 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 
 Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. [S14](beta-operations.md) incorpora el despliegue real por invitación, restauración de trabajo/IdP/claves, reinicio y rollback; también se verificó Codex por HTTPS público con dos usuarios sintéticos. Google/GitHub y la lectura de Jira conservan sus historias pendientes.
 
-### MVP actual · 2026-10-29
+### Avance histórico · 2026-10-29
 
 El código de [S09: Jira Cloud](jira-source.md) obtiene únicamente descripción, título y fecha del issue permitido por la conexión personal. `adf-md-v1` convierte el contenido admitido y conserva datos no representables con avisos explícitos; no se cargan comentarios/adjuntos ni se escriben cambios de negocio.
 
@@ -214,3 +214,7 @@ Integración: [autorización MCP](https://modelcontextprotocol.io/specification/
 ## Verificación de este plan
 
 El plan original se contrastó en dos rondas entre tres agentes mediante lectura de límites y puntos de entrada; ese ejercicio no implementó autenticación, persistencia, conectores o despliegue. Los avances posteriores se documentan en sus guías y pruebas, sin atribuirlos al comité. Las características de proveedores citadas deben verificarse de nuevo al fijar versiones y probar la integración real.
+
+## Validación Jira del 2026-11-04
+
+La prueba OAuth y lectura Jira con la cuenta propietaria de la app pasó, incluida propuesta por Codex/MCP, preservación del original y su procedencia, aislamiento y conflicto de revisión. Se retiraron los datos, credencial y cuentas de prueba sin modificar el trabajo del propietario. [Evidencia y alcance](jira-source.md#validación-real-y-distribución). Sharing sigue deshabilitado; #17 no se considera terminado. Los apartados fechados en octubre conservan sus resultados históricos.

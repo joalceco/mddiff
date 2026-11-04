@@ -2,7 +2,7 @@
 
 Issue: [#10](https://github.com/joalceco/mddiff/issues/10). La captura usa la conexión personal Jira Cloud existente, no una credencial compartida entre usuarios.
 
-Estado al **2026-10-29**: el código está desplegado con SQLite 4 y las pruebas sintéticas pasan; #10 sigue abierto porque aún no se ha verificado una lectura real de Jira. Falta un secreto OAuth válido configurado por el operador. La autorización para otras cuentas de Atlassian está bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17); **Sharing** permanece deshabilitado.
+Estado al **2026-11-04**: se verificaron OAuth, lectura real de una descripción Jira y comparación con una propuesta enviada mediante Codex/MCP sobre el binario publicado `6bfccea` y SQLite 4. La app sigue privada; [#17](https://github.com/joalceco/mddiff/issues/17) bloquea la distribución a otras cuentas Atlassian.
 
 ## Resultado y alcance
 
@@ -99,12 +99,14 @@ Verificado el 2026-10-29: pasan los seis tests unitarios de conversión ADF, la 
 
 El commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` está desplegado con SQLite 4. La [evidencia operativa](beta-operations.md#actualización-del-2026-10-29) registra migración y rollback, cliente Codex público y los límites de cada comprobación. Ninguno de esos resultados acredita la lectura real de Jira.
 
-## Validación real pendiente y distribución
+## Validación real y distribución
 
-Una vez configurado el secreto privado válido, la cuenta propietaria de la aplicación 3LO puede consentir una prueba sin habilitar Sharing. El código no exige distribuir la aplicación para esa prueba. No se ha registrado aún un consentimiento o una lectura reales.
+El 2026-11-04, con el secreto externo privado configurado, la cuenta propietaria completó OAuth y una cuenta desechable de mddiff abrió la descripción de un issue real autorizado. El visor mostró referencia, captura, `adf-md-v1` y avisos. Codex real leyó ese trabajo y envió una propuesta sintética por MCP: el original y su procedencia permanecieron iguales, otra cuenta quedó vacía y una revisión antigua recibió `409`. No hubo turnos de modelo ni escrituras en Jira. Esta prueba acredita un caso real, no todo ADF ni otra cuenta Atlassian; esos contratos conservan sus fixtures sintéticas.
 
 La consola de Atlassian exige una atestación sobre **Personal Data Reporting API** para aplicaciones que almacenan datos personales antes de habilitar Sharing. Esa API no está implementada en mddiff. [#17](https://github.com/joalceco/mddiff/issues/17) conserva este bloqueo; no se ha emitido la atestación ni se habilita autorización para otras cuentas. Consulta [la configuración de consentimiento](personal-connections.md#consentimiento-de-jira-cloud) para separar la aplicación privada de su distribución.
 
 ## Fuentes primarias
 
 Consultadas el 2026-10-29: [REST API Jira Cloud v3](https://developer.atlassian.com/cloud/jira/platform/rest/v3/), [Get issue y campos solicitados](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get), [estructura de ADF](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/), [marcas de enlace](https://developer.atlassian.com/cloud/jira/platform/apis/document/marks/link/) y [celdas combinadas](https://developer.atlassian.com/cloud/jira/platform/apis/document/nodes/table_cell/).
+
+Tras verificar la comparación visible, se borraron original y propuesta de prueba, se desconectó su credencial Jira y se retiraron las cuentas desechables antes del respaldo. No se publican el sitio, la clave del issue, su contenido, las capturas privadas ni los secretos. El trabajo del propietario de mddiff no se modificó.
