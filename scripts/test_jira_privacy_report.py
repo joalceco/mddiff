@@ -62,10 +62,10 @@ class Reporting(unittest.TestCase):
     def database(self, name, base, candidate=None, legacy=False):
         path = self.root / name
         with closing(sqlite3.connect(path)) as db, db:
-            db.executescript("CREATE TABLE current_work (base_label TEXT,candidate_label TEXT,jira_privacy TEXT); PRAGMA user_version=5;")
+            db.executescript("CREATE TABLE current_work (base_label TEXT,candidate_label TEXT,jira_privacy TEXT,revision INTEGER NOT NULL DEFAULT 1); PRAGMA user_version=5;")
             item = lambda values: {"accounts": values or {}, "unclassified": False}
             raw = None if legacy else json.dumps({"base": item(base), "candidate": item(candidate)})
-            db.execute("INSERT INTO current_work VALUES ('base',?,?)", ("proposal" if candidate is not None else None, raw))
+            db.execute("INSERT INTO current_work(base_label,candidate_label,jira_privacy) VALUES ('base',?,?)", ("proposal" if candidate is not None else None, raw))
         path.chmod(0o600)
         return path
 
@@ -74,7 +74,7 @@ class Reporting(unittest.TestCase):
         with closing(sqlite3.connect(live)) as db, db:
             other_owner = {"base": {"accounts": {"synthetic:alice": NOW - 50, "synthetic:charlie": NOW - 200}, "unclassified": False},
                            "candidate": {"accounts": {}, "unclassified": False}}
-            db.execute("INSERT INTO current_work VALUES ('another owner',NULL,?)", (json.dumps(other_owner),))
+            db.execute("INSERT INTO current_work(base_label,candidate_label,jira_privacy) VALUES ('another owner',NULL,?)", (json.dumps(other_owner),))
         backup = self.database("backup.db", {"synthetic:alice": NOW - 100})
         accounts, summary = privacy.inventory([live, backup], NOW)
         self.assertEqual(accounts, {"synthetic:alice": NOW - 100, "synthetic:bob": NOW - 20, "synthetic:charlie": NOW - 200})
@@ -242,6 +242,71 @@ class Reporting(unittest.TestCase):
                 privacy.main()
             self.assertEqual(calls, [])
             self.assertFalse(self.state.exists())
+
+    def barrier_database(self):
+        (self.root / "data").mkdir(mode=0o700)
+        return self.database("data/current.db", {})
+
+    def activate(self, path):
+        with closing(sqlite3.connect(path)) as db, db:
+            db.executescript("CREATE TABLE privacy_guard(singleton INTEGER PRIMARY KEY,generation INTEGER,revision_floor INTEGER); INSERT INTO privacy_guard VALUES(1,0,0); PRAGMA user_version=6;")
+
+    def test_staging_is_monotonic_idempotent_and_does_not_acknowledge_erasure(self):
+        database = self.barrier_database()
+        journal = self.root / "journal.json"
+        self.assertEqual(privacy.stage_erasures(database, self.state, journal, NOW, create=True)["generation"], 0)
+        self.activate(database)
+        state = privacy.state_file(self.state, NOW)
+        for status, received, expected in [("updated", NOW - 10, "updated"), ("closed", NOW - 20, "closed"), ("updated", NOW, "closed")]:
+            state["pending"]["synthetic:alice"] = {"status": status, "received_at": received}
+            privacy.write_state(self.state, state)
+            result = privacy.stage_erasures(database, self.state, journal, NOW)
+            self.assertEqual(result["pending"], 1)
+            self.assertEqual(privacy.private_read(journal)["accounts"]["synthetic:alice"]["status"], expected)
+        saved = privacy.private_read(journal)
+        self.assertEqual(saved["generation"], 3)
+        self.assertEqual(saved["accounts"]["synthetic:alice"]["received_at"], NOW)
+        stamp = journal.stat().st_ino, journal.stat().st_mtime_ns
+        privacy.stage_erasures(database, self.state, journal, NOW)
+        self.assertEqual((journal.stat().st_ino, journal.stat().st_mtime_ns), stamp)
+        self.assertEqual(privacy.private_read(self.state)["pending"], state["pending"])
+
+    def test_staging_refuses_a_live_writer_or_missing_or_rolled_back_journal(self):
+        database = self.barrier_database()
+        journal = self.root / "journal.json"
+        privacy.stage_erasures(database, self.state, journal, NOW, create=True)
+        self.activate(database)
+        with closing(sqlite3.connect(database)) as writer:
+            writer.executescript("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
+            with self.assertRaises(sqlite3.OperationalError):
+                privacy.stage_erasures(database, self.state, journal, NOW)
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE privacy_guard SET generation=1")
+        with self.assertRaises(RuntimeError):
+            privacy.stage_erasures(database, self.state, journal, NOW)
+        journal.unlink()
+        for create in (False, True):
+            with self.assertRaises((RuntimeError, FileNotFoundError)):
+                privacy.stage_erasures(database, self.state, journal, NOW, create=create)
+
+    def test_blank_journal_cannot_replace_reporting_history(self):
+        database = self.barrier_database()
+        state = privacy.state_file(self.state, NOW)
+        state["pending"]["synthetic:alice"] = {"status": "closed", "received_at": NOW - 1}
+        privacy.write_state(self.state, state)
+        with self.assertRaises(RuntimeError):
+            privacy.stage_erasures(database, self.state, self.root / "journal.json", NOW, create=True)
+        self.assertFalse((self.root / "journal.json").exists())
+
+    def test_atomic_publication_preserves_the_reader_owner(self):
+        privacy.write_state(self.state, {"version": 1})
+        before = self.state.stat()
+        privacy.write_state(self.state, {"version": 2})
+        self.assertEqual((self.state.stat().st_uid, self.state.stat().st_gid), (before.st_uid, before.st_gid))
+        different_owner = (10001 if before.st_uid != 10001 else 10002, 10001)
+        with patch.object(privacy.os, "fchown") as chown:
+            privacy.write_state(self.state, {"version": 3}, owner=different_owner)
+            self.assertEqual(chown.call_args.args[1:], different_owner)
 
 
 if __name__ == "__main__":

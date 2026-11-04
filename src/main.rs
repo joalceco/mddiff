@@ -513,6 +513,8 @@ struct Arguments {
     oidc_config: Option<PathBuf>,
     connections_config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    jira_privacy_file: Option<PathBuf>,
+    apply_jira_privacy: bool,
     bind: Ipv4Addr,
     port: u16,
     documents: Vec<PathBuf>,
@@ -528,6 +530,8 @@ fn parse_arguments(
         oidc_config: None,
         connections_config: None,
         data_dir: None,
+        jira_privacy_file: None,
+        apply_jira_privacy: false,
         bind: Ipv4Addr::LOCALHOST,
         port: 3847,
         documents: Vec::new(),
@@ -566,6 +570,15 @@ fn parse_arguments(
                         .into(),
                 );
             }
+            Some("--jira-privacy-file") => {
+                options.jira_privacy_file = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta el registro después de --jira-privacy-file.")?
+                        .into(),
+                );
+            }
+            Some("--apply-jira-privacy") => options.apply_jira_privacy = true,
             Some("--root") => {
                 options.root = Some(
                     arguments
@@ -604,6 +617,16 @@ fn parse_arguments(
     }
     if options.mode == CliMode::Local && options.oidc_config.is_some() {
         return Err("--oidc-config solo está disponible en modo alojado.".into());
+    }
+    if options.jira_privacy_file.is_some() && options.mode != CliMode::Hosted {
+        return Err("--jira-privacy-file requiere modo hosted.".into());
+    }
+    if options.apply_jira_privacy
+        && (options.jira_privacy_file.is_none()
+            || options.oidc_config.is_some()
+            || options.connections_config.is_some())
+    {
+        return Err("--apply-jira-privacy requiere hosted, --data-dir y --jira-privacy-file, sin configuración de acceso o conexiones.".into());
     }
     if options.connections_config.is_some()
         && (options.mode != CliMode::Hosted || options.oidc_config.is_none())
@@ -648,10 +671,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [original.md propuesta.md]\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [--jira-privacy-file ARCHIVO] [original.md propuesta.md]\nAplicación sin servidor: mddiff --mode hosted --data-dir CARPETA --jira-privacy-file ARCHIVO --apply-jira-privacy\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
         );
         return Ok(());
     };
+    if arguments.apply_jira_privacy {
+        let store = Workspaces::persistent_with_barrier(
+            arguments.data_dir.as_deref().unwrap(),
+            arguments.jira_privacy_file.as_deref().unwrap(),
+        )?;
+        store.check_storage().await?;
+        println!(
+            "JIRA_PRIVACY_APPLIED: registro externo verificado y decisiones aplicadas; no se inició un servidor."
+        );
+        return Ok(());
+    }
     let auth = match &arguments.oidc_config {
         Some(path) => Some(Arc::new(
             auth::Authenticator::new(auth::Config::load(path)?).await?,
@@ -662,9 +696,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
             arguments.root.unwrap_or_else(|| PathBuf::from(".")),
         )?)),
-        CliMode::Hosted => Mode::Hosted(Workspaces::persistent(
-            arguments.data_dir.as_deref().unwrap(),
-        )?),
+        CliMode::Hosted => Mode::Hosted(match &arguments.jira_privacy_file {
+            Some(path) => {
+                Workspaces::persistent_with_barrier(arguments.data_dir.as_deref().unwrap(), path)?
+            }
+            None => Workspaces::persistent(arguments.data_dir.as_deref().unwrap())?,
+        }),
     };
     let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();

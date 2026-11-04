@@ -1,0 +1,11 @@
+# Optional until privacy activation; preserve this external directory during restores.
+services:
+  mddiff:
+    command: ["--mode", "hosted", "--bind", "0.0.0.0", "--port", "3847", "--data-dir", "/var/lib/mddiff", "--oidc-config", "/run/secrets/mddiff/oidc.json", "--connections-config", "/run/secrets/mddiff/connections.json", "--jira-privacy-file", "/run/mddiff-privacy/journal.json"]
+    volumes:
+      - type: bind
+        source: ${MDDIFF_PRIVACY_DIR:-/srv/mddiff/privacy}
+        target: /run/mddiff-privacy
+        read_only: true
+        bind:
+          create_host_path: false

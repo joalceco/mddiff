@@ -92,7 +92,7 @@ impl JiraData {
     }
 }
 
-fn valid_account_id(id: &str) -> bool {
+pub(crate) fn valid_account_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id != "unknown"

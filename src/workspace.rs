@@ -247,7 +247,24 @@ impl Workspaces {
         })
     }
 
+    pub fn persistent_with_barrier(
+        directory: &std::path::Path,
+        journal: &std::path::Path,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            users: Mutex::default(),
+            storage: Some(Arc::new(Storage::open_with_barrier(
+                directory,
+                Some(journal),
+            )?)),
+            budget: Arc::default(),
+        })
+    }
+
     async fn entry(&self, identity: &VerifiedIdentity) -> Result<Arc<Workspace>, AppError> {
+        if let Some(storage) = &self.storage {
+            storage.check_barrier()?;
+        }
         let mut users = self.users.lock().await;
         if self.storage.is_some() && !users.contains_key(identity) && users.len() >= 10 {
             let idle = users
@@ -816,6 +833,399 @@ mod tests {
         }
     }
 
+    fn privacy_fixture() -> (Database, std::path::PathBuf, std::path::PathBuf) {
+        let root = Database::new();
+        std::fs::create_dir(&root.0).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = root.0.join("data");
+        let journal = root.0.join("journal.json");
+        write_privacy_journal(&journal, 0, serde_json::json!({}));
+        (root, data, journal)
+    }
+
+    fn write_privacy_journal(path: &std::path::Path, generation: u64, accounts: serde_json::Value) {
+        let next = path.with_extension("next");
+        std::fs::write(
+            &next,
+            serde_json::to_vec(
+                &serde_json::json!({"version":1,"generation":generation,"revision_floor":generation * crate::erasure::REVISION_SPAN,"accounts":accounts}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::rename(next, path).unwrap();
+    }
+
+    fn personal_data(id: &str, at: u64) -> JiraData {
+        JiraData {
+            accounts: std::collections::BTreeMap::from([(id.into(), at)]),
+            unclassified: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn external_erasure_filters_restored_copies_for_all_owners_before_serving() {
+        let (root, data, journal) = privacy_fixture();
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            for (subject, base, candidate, base_data, candidate_data) in [
+                (
+                    "alice",
+                    "Original-A-to-remove",
+                    Some("Proposal-A-to-remove"),
+                    personal_data("synthetic:closed", 100),
+                    JiraData::default(),
+                ),
+                (
+                    "bob",
+                    "Original-B-to-keep\r\n",
+                    Some("Proposal-B-to-remove"),
+                    personal_data("synthetic:other", 100),
+                    personal_data("synthetic:closed", 100),
+                ),
+                (
+                    "charlie",
+                    "Fresh-C-to-keep",
+                    None,
+                    personal_data("synthetic:updated", 300),
+                    JiraData::default(),
+                ),
+                (
+                    "delta",
+                    "Stale-D-to-remove",
+                    None,
+                    personal_data("synthetic:updated", 100),
+                    JiraData::default(),
+                ),
+            ] {
+                let workspace = store.for_user(&identity("issuer", subject)).await.unwrap();
+                workspace
+                    .update(Some(0), None, move || {
+                        Ok(Work {
+                            base: Some(document(base)),
+                            candidate: candidate.map(document),
+                            jira_privacy: WorkPrivacy {
+                                base: base_data,
+                                candidate: candidate_data,
+                            },
+                            ..Work::default()
+                        })
+                    })
+                    .await
+                    .unwrap();
+            }
+            connect(&store, &identity("issuer", "alice"), 0);
+        }
+        let restored = root.0.join("restored");
+        std::fs::create_dir(&restored).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&restored, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::copy(data.join("work.sqlite3"), restored.join("work.sqlite3")).unwrap();
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            store
+                .for_user(&identity("issuer", "bob"))
+                .await
+                .unwrap()
+                .propose_if_revision(1, document("Proposal-B-to-remove"))
+                .await
+                .unwrap();
+        }
+        write_privacy_journal(
+            &journal,
+            1,
+            serde_json::json!({
+                "synthetic:closed":{"status":"closed","received_at":200},
+                "synthetic:updated":{"status":"updated","received_at":200}
+            }),
+        );
+        for path in [&data, &restored] {
+            {
+                let store = Workspaces::persistent_with_barrier(path, &journal).unwrap();
+                for subject in ["alice", "delta"] {
+                    let work = store
+                        .for_user(&identity("issuer", subject))
+                        .await
+                        .unwrap()
+                        .work()
+                        .await;
+                    assert!(work.base.is_none() && work.candidate.is_none());
+                    assert_eq!(work.revision, crate::erasure::REVISION_SPAN);
+                    assert_eq!(work.jira_privacy, WorkPrivacy::default());
+                }
+                let bob = store
+                    .for_user(&identity("issuer", "bob"))
+                    .await
+                    .unwrap()
+                    .work()
+                    .await;
+                assert_eq!(
+                    bob.base.as_ref().unwrap().markdown,
+                    "Original-B-to-keep\r\n"
+                );
+                assert!(bob.candidate.is_none());
+                let stale = store
+                    .for_user(&identity("issuer", "bob"))
+                    .await
+                    .unwrap()
+                    .propose_if_revision(2, document("stale erased name"))
+                    .await;
+                assert_eq!(stale.err().unwrap().0, axum::http::StatusCode::CONFLICT);
+                assert_eq!(bob.revision, crate::erasure::REVISION_SPAN);
+                let charlie = store
+                    .for_user(&identity("issuer", "charlie"))
+                    .await
+                    .unwrap();
+                assert_eq!(charlie.work().await.revision, 1);
+                assert_eq!(
+                    charlie.work().await.base.as_ref().unwrap().markdown,
+                    "Fresh-C-to-keep"
+                );
+                assert_eq!(
+                    store
+                        .storage
+                        .as_ref()
+                        .unwrap()
+                        .read_connection(&identity("issuer", "alice"), "memos", "notes")
+                        .unwrap()
+                        .generation,
+                    1
+                );
+                assert!(
+                    store
+                        .for_user(&identity("issuer", "alice"))
+                        .await
+                        .unwrap()
+                        .propose_if_revision(1, document("late proposal"))
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    charlie
+                        .update(Some(1), None, || Ok(Work {
+                            base: Some(document("closed reinsertion")),
+                            jira_privacy: WorkPrivacy {
+                                base: personal_data("synthetic:closed", 400),
+                                ..WorkPrivacy::default()
+                            },
+                            ..Work::default()
+                        }))
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(Workspaces::persistent(path).is_err());
+            for entry in std::fs::read_dir(path).unwrap() {
+                let raw = std::fs::read(entry.unwrap().path()).unwrap();
+                for erased in [
+                    "Original-A-to-remove",
+                    "Proposal-A-to-remove",
+                    "Proposal-B-to-remove",
+                    "Stale-D-to-remove",
+                ] {
+                    assert!(
+                        !raw.windows(erased.len())
+                            .any(|bytes| bytes == erased.as_bytes())
+                    );
+                }
+            }
+            let again = Workspaces::persistent_with_barrier(path, &journal).unwrap();
+            assert_eq!(
+                again
+                    .for_user(&identity("issuer", "alice"))
+                    .await
+                    .unwrap()
+                    .work()
+                    .await
+                    .revision,
+                crate::erasure::REVISION_SPAN
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn erasure_rolls_back_all_work_if_any_document_cannot_be_classified() {
+        let (_root, data, journal) = privacy_fixture();
+        {
+            let store = Workspaces::persistent(&data).unwrap();
+            for (subject, privacy) in [
+                ("a", personal_data("synthetic:closed", 100)),
+                (
+                    "z",
+                    JiraData {
+                        unclassified: true,
+                        ..JiraData::default()
+                    },
+                ),
+            ] {
+                store
+                    .for_user(&identity("issuer", subject))
+                    .await
+                    .unwrap()
+                    .update(Some(0), None, move || {
+                        Ok(Work {
+                            base: Some(document("preserve original")),
+                            jira_privacy: WorkPrivacy {
+                                base: privacy,
+                                ..WorkPrivacy::default()
+                            },
+                            ..Work::default()
+                        })
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        write_privacy_journal(
+            &journal,
+            1,
+            serde_json::json!({"synthetic:closed":{"status":"closed","received_at":200}}),
+        );
+        assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        assert!(Workspaces::persistent(&data).is_err());
+        let db = rusqlite::Connection::open(data.join("work.sqlite3")).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM current_work WHERE revision=1 AND base_markdown='preserve original'",[],|r|r.get::<_,u32>(0)).unwrap(),2);
+        assert_eq!(
+            db.query_row("SELECT generation FROM privacy_guard", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn privacy_revision_ranges_never_overlap_or_wrap() {
+        let (_root, data, journal) = privacy_fixture();
+        let owner = identity("issuer", "alice");
+        let last = crate::erasure::REVISION_SPAN - 1;
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            store
+                .for_user(&owner)
+                .await
+                .unwrap()
+                .replace_if_revision(0, document("keep original"), None)
+                .await
+                .unwrap();
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .database_for_test()
+                .execute("UPDATE current_work SET revision=?1", [last as i64])
+                .unwrap();
+        }
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            assert_eq!(
+                workspace
+                    .propose_if_revision(last, document("overlap"))
+                    .await
+                    .err()
+                    .unwrap()
+                    .0,
+                axum::http::StatusCode::BAD_REQUEST
+            );
+            assert_eq!(workspace.work().await.revision, last);
+        }
+        write_privacy_journal(&journal, 1, serde_json::json!({}));
+        let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+        let workspace = store.for_user(&owner).await.unwrap();
+        workspace
+            .propose_if_revision(last, document("next era"))
+            .await
+            .unwrap();
+        assert_eq!(
+            workspace.work().await.revision,
+            crate::erasure::REVISION_SPAN
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_missing_or_rolled_back_erasure_journal_closes_access() {
+        let (_root, data, journal) = privacy_fixture();
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            let workspace = store.for_user(&identity("issuer", "alice")).await.unwrap();
+            workspace
+                .replace_if_revision(0, document("safe current"), None)
+                .await
+                .unwrap();
+            write_privacy_journal(&journal, 1, serde_json::json!({}));
+            assert!(store.for_user(&identity("issuer", "alice")).await.is_err());
+            assert!(store.check_storage().await.is_err());
+            assert!(
+                workspace
+                    .propose_if_revision(1, document("late write"))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(workspace.work().await.revision, 1);
+        }
+        drop(Workspaces::persistent_with_barrier(&data, &journal).unwrap());
+        write_privacy_journal(&journal, 0, serde_json::json!({}));
+        assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        std::fs::remove_file(&journal).unwrap();
+        assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        assert!(Workspaces::persistent(&data).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erasure_journal_requires_private_external_regular_valid_input() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (root, data, journal) = privacy_fixture();
+        drop(Workspaces::persistent_with_barrier(&data, &journal).unwrap());
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.0.join("linked.json");
+        symlink(&journal, &link).unwrap();
+        assert!(Workspaces::persistent_with_barrier(&data, &link).is_err());
+        let inside = data.join("journal.json");
+        std::fs::copy(&journal, &inside).unwrap();
+        assert!(Workspaces::persistent_with_barrier(&data, &inside).is_err());
+        let hard = root.0.join("hard.json");
+        std::fs::hard_link(&journal, &hard).unwrap();
+        assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        std::fs::remove_file(hard).unwrap();
+        {
+            let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o400)).unwrap();
+            assert!(store.storage.as_ref().unwrap().check_health().is_err());
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(store.storage.as_ref().unwrap().check_health().is_err());
+            std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for accounts in [
+            serde_json::json!({"unknown":{"status":"closed","received_at":100}}),
+            serde_json::json!({"synthetic:alice":{"status":"unexpected","received_at":100}}),
+            serde_json::json!({"synthetic:alice":{"status":"closed","received_at":0}}),
+        ] {
+            write_privacy_journal(&journal, 1, accounts);
+            assert!(Workspaces::persistent_with_barrier(&data, &journal).is_err());
+        }
+        std::fs::write(&journal, "sensitive-diagnostic-must-not-appear").unwrap();
+        let error = Workspaces::persistent_with_barrier(&data, &journal)
+            .err()
+            .unwrap();
+        assert!(!error.to_string().contains("sensitive-diagnostic"));
+    }
+
     #[tokio::test]
     async fn jira_inventory_survives_derived_proposals_source_changes_restart_and_owner_isolation()
     {
@@ -991,7 +1401,7 @@ mod tests {
             .unwrap();
         database
             .execute_batch(
-                "ALTER TABLE current_work DROP COLUMN jira_privacy; PRAGMA user_version=4;",
+                "DROP TABLE privacy_guard; ALTER TABLE current_work DROP COLUMN jira_privacy; PRAGMA user_version=4;",
             )
             .unwrap();
         drop(database);
@@ -1105,7 +1515,7 @@ mod tests {
                 .unwrap();
         }
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
-        connection.execute_batch("ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=3;").unwrap();
+        connection.execute_batch("DROP TABLE privacy_guard; ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=3;").unwrap();
         drop(connection);
         let store = Workspaces::persistent(&directory.0).unwrap();
         let workspace = store.for_user(&owner).await.unwrap();
@@ -1638,7 +2048,7 @@ mod tests {
         let database = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
         database
             .execute_batch(
-                "ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_source; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=2;",
+                "DROP TABLE privacy_guard; ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_source; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=2;",
             )
             .unwrap();
         drop(database);
@@ -1667,7 +2077,7 @@ mod tests {
                 .database_for_test()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 
@@ -1953,7 +2363,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
         let columns: i32 = connection
             .query_row(
@@ -1963,7 +2373,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(columns, 11);
-        connection.pragma_update(None, "user_version", 6).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
         drop(connection);
         assert!(Workspaces::persistent(&directory.0).is_err());
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
@@ -1971,7 +2381,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            6
+            7
         );
     }
 

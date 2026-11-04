@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Offline inventory and resumable Jira 3LO reporting; does not attest Sharing or erase copies."""
+"""Offline inventory, Jira 3LO reporting and decision staging; does not attest Sharing or erase copies."""
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 import fcntl
@@ -20,6 +20,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 ENDPOINT = "https://api.atlassian.com/app/report-accounts/"
 DAY = 86400
 DEFAULT_CYCLE = 7 * DAY
+REVISION_SPAN = 1_000_000_000
+MAX_SAFE_REVISION = 2**53 - 1
 ACCOUNT = re.compile(r"[A-Za-z0-9:-]{1,128}\Z")
 
 
@@ -51,14 +53,23 @@ def private_parent(path):
     return parent
 
 
-def write_state(path, state):
+def write_state(path, state, owner=None):
     parent = private_parent(path)
+    if Path(path).exists() or Path(path).is_symlink():
+        previous = Path(path).lstat()
+        require(stat.S_ISREG(previous.st_mode) and previous.st_mode & 0o077 == 0 and previous.st_nlink == 1,
+                "Existing privacy state must be a private regular file.")
+        owner = owner or (previous.st_uid, previous.st_gid)
+    content = json.dumps(state, separators=(",", ":"), sort_keys=True) + "\n"
+    require(len(content) <= 64 * 1024 * 1024, "Privacy state exceeds the supported size; preserve the previous file.")
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", dir=parent, prefix=".jira-report-", delete=False) as output:
             temporary = Path(output.name)
-            json.dump(state, output, separators=(",", ":"), sort_keys=True)
-            output.write("\n")
+            current = os.fstat(output.fileno())
+            if owner is not None and (current.st_uid, current.st_gid) != owner:
+                os.fchown(output.fileno(), *owner)
+            output.write(content)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -82,8 +93,8 @@ def inventory(databases, now):
         require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0,
                 "Inventory requires private regular SQLite checkpoints.")
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            require(db.execute("PRAGMA user_version").fetchone()[0] == 5,
-                    "Inventory requires schema 5; older checkpoints need classification.")
+            require(db.execute("PRAGMA user_version").fetchone()[0] in (5, 6),
+                    "Inventory requires schema 5 or 6; older checkpoints need classification.")
             for base, candidate, raw in db.execute("SELECT base_label IS NOT NULL,candidate_label IS NOT NULL,jira_privacy FROM current_work"):
                 if not (base or candidate):
                     continue
@@ -165,10 +176,8 @@ def seconds_header(headers, name, default, multiplier=1):
     return int(seconds.to_integral_value(rounding=ROUND_CEILING))
 
 
-def report(accounts, path, token, now, send=post_report, clock=None):
-    require(isinstance(token, str) and 0 < len(token) <= 8192
-            and all(33 <= ord(c) <= 126 for c in token), "Invalid private reporting credential.")
-    clock = clock or (lambda: now)
+@contextmanager
+def reporting_lock(path):
     private_parent(path)
     lock_path = Path(str(path) + ".lock")
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -180,6 +189,14 @@ def report(accounts, path, token, now, send=post_report, clock=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Another reporter holds the lock.") from None
+        yield
+
+
+def report(accounts, path, token, now, send=post_report, clock=None):
+    require(isinstance(token, str) and 0 < len(token) <= 8192
+            and all(33 <= ord(c) <= 126 for c in token), "Invalid private reporting credential.")
+    clock = clock or (lambda: now)
+    with reporting_lock(path):
         state = state_file(path, now)
         require(not any(item["inflight"] for item in state["accounts"].values()),
                 "An earlier response is uncertain; reconcile it before sending again.")
@@ -237,14 +254,86 @@ def report(accounts, path, token, now, send=post_report, clock=None):
         return {"reported": sent, "deferred": len(accounts) - sent, "pending": len(state["pending"])}
 
 
+def stage_erasures(database, path, journal_path, now, create=False):
+    """Publish a monotonic external barrier only while the current database is exclusively locked."""
+    database, path, journal_path = Path(database), Path(path), Path(journal_path)
+    directory = private_parent(journal_path).stat()
+    journal_owner = (directory.st_uid, directory.st_gid)
+    require(journal_path.resolve() not in (path.resolve(), Path(str(path) + ".lock").resolve()),
+            "The journal must be separate from reporting state and lock.")
+    for external in (path, journal_path):
+        require(not external.resolve().is_relative_to(database.parent.resolve())
+                and not any((parent / ".git").exists() for parent in external.resolve().parents),
+                "Privacy state and journal must be outside document data and repositories.")
+    info = database.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0,
+            "The current database must be private and regular.")
+    with reporting_lock(path), closing(sqlite3.connect(database.resolve().as_uri() + "?mode=rw", uri=True, timeout=1)) as db:
+        db.execute("BEGIN EXCLUSIVE")
+        try:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            require(version in (4, 5, 6), "Unsupported current database schema.")
+            applied = db.execute("SELECT generation,revision_floor FROM privacy_guard WHERE singleton=1").fetchone() if version == 6 else None
+            maximum = db.execute("SELECT COALESCE(MAX(revision),0) FROM current_work").fetchone()[0]
+            state = state_file(path, now)
+            if create:
+                require(not journal_path.exists() and not journal_path.is_symlink() and applied is None
+                        and not state["accounts"] and not state["pending"] and state["retry_after"] == 0,
+                        "A blank journal may only be created before first activation and reporting.")
+                floor = max(now * 1_000_000, maximum + 1)
+                require(floor <= MAX_SAFE_REVISION - REVISION_SPAN, "Privacy revision range exhausted.")
+                journal = {"version": 1, "generation": 0, "revision_floor": floor, "accounts": {}}
+                write_state(journal_path, journal, owner=journal_owner)
+            else:
+                require(applied is not None, "The current database has not activated an external barrier.")
+                journal = private_read(journal_path)
+                require(isinstance(journal, dict) and set(journal) == {"version", "generation", "revision_floor", "accounts"}
+                        and type(journal["version"]) is int and journal["version"] == 1
+                        and type(journal["generation"]) is int and applied[0] <= journal["generation"] < 2**63
+                        and type(journal["revision_floor"]) is int and applied[1] <= journal["revision_floor"] <= MAX_SAFE_REVISION - REVISION_SPAN
+                        and journal["revision_floor"] >= applied[1] + (journal["generation"] - applied[0]) * REVISION_SPAN
+                        and isinstance(journal["accounts"], dict) and len(journal["accounts"]) <= 1_000_000
+                        and (journal["generation"] != 0 or not journal["accounts"]), "Invalid or rolled-back erasure journal.")
+                for key, rule in journal["accounts"].items():
+                    require(account_id(key) and isinstance(rule, dict) and set(rule) == {"status", "received_at"}
+                            and rule["status"] in ("closed", "updated") and type(rule["received_at"]) is int
+                            and 0 < rule["received_at"] <= now, "Invalid erasure decision.")
+                changed = False
+                for key, decision in state["pending"].items():
+                    old = journal["accounts"].get(key)
+                    merged = {"status": "closed" if decision["status"] == "closed" or old and old["status"] == "closed" else "updated",
+                              "received_at": max(decision["received_at"], old["received_at"] if old else 0)}
+                    if old != merged:
+                        journal["accounts"][key] = merged
+                        changed = True
+                if changed:
+                    require(len(journal["accounts"]) <= 1_000_000, "Erasure journal account limit reached.")
+                    require(journal["generation"] < 2**63 - 1, "Erasure generation limit reached.")
+                    journal["generation"] += 1
+                    journal["revision_floor"] = max(journal["revision_floor"] + REVISION_SPAN, maximum + 1, now * 1_000_000)
+                    require(journal["revision_floor"] <= MAX_SAFE_REVISION - REVISION_SPAN, "Privacy revision range exhausted.")
+                    write_state(journal_path, journal, owner=journal_owner)
+            return {"generation": journal["generation"], "revision_floor": journal["revision_floor"], "decisions": len(journal["accounts"]), "pending": len(state["pending"])}
+        finally:
+            db.rollback()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("inventory", "report"))
+    parser.add_argument("command", choices=("inventory", "report", "stage-erasure"))
     parser.add_argument("--database", action="append", required=True, type=Path)
     parser.add_argument("--state", type=Path)
     parser.add_argument("--credential", type=Path, help="Private JSON containing only access_token; never pass the token as an argument.")
+    parser.add_argument("--journal", type=Path)
+    parser.add_argument("--create-journal", action="store_true", help="One-time creation before reporting; never use to recover a missing journal.")
     args = parser.parse_args()
     now = int(time.time())
+    if args.command == "stage-erasure":
+        require(len(args.database) == 1 and args.state is not None and args.journal is not None,
+                "Staging requires the current stopped database, reporting state and external journal.")
+        print(json.dumps(stage_erasures(args.database[0], args.state, args.journal, now, args.create_journal), sort_keys=True))
+        return
+    require(not args.create_journal and args.journal is None, "Journal options are only available with stage-erasure.")
     accounts, summary = inventory(args.database, now)
     if args.command == "report":
         require(summary["unclassified"] == 0, "Unclassified documents remain; no report was sent.")

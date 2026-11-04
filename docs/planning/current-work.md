@@ -4,7 +4,7 @@ Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Ram
 
 Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. [S08: captura de Memos](memos-source.md) añade procedencia en el esquema 3.
 
-La rama, al 2026-11-04, usa SQLite 5 y añade el [inventario privado de Jira](jira-privacy.md). La beta publicada mantiene SQLite 4, que incorporó metadatos opcionales de tipo y momento de recepción por lado para [el selector de orígenes](source-picker.md). La evidencia histórica de S04 se conserva al final.
+La rama, al 2026-11-04, usa SQLite 6: el esquema 5 añade el inventario privado de Jira y el 6 registra la dependencia de una [barrera externa de privacidad](jira-privacy.md). Al activar esa barrera pueden borrarse documentos afectados por decisiones del proveedor; ese flujo se prueba localmente y todavía no está desplegado. La beta publicada mantiene SQLite 4, que incorporó metadatos opcionales de tipo y momento de recepción por lado para [el selector de orígenes](source-picker.md). La evidencia histórica de S04 se conserva al final.
 
 [S12: contenedor alojado](container-deployment.md) amplía la operación mediante un bind explícito con OIDC, volumen y secretos externos. Las referencias al listener limitado a loopback corresponden a la entrega S04; los límites de borrado y retención siguen vigentes.
 

@@ -10,13 +10,15 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AppError,
-    privacy::WorkPrivacy,
+    erasure::{Barrier, REVISION_SPAN},
+    privacy::{JiraData, WorkPrivacy},
     workspace::{Document, InputMetadata, SourceMetadata, VerifiedIdentity, Work},
 };
 
 pub(crate) struct Storage {
     connection: Mutex<Connection>,
     directory: PathBuf,
+    barrier: Option<Barrier>,
 }
 
 pub(crate) struct EncryptedCredential {
@@ -44,6 +46,7 @@ pub(crate) fn conflict() -> AppError {
 
 impl Storage {
     pub(crate) fn check_health(&self) -> Result<(), AppError> {
+        self.check_barrier()?;
         self.connection
             .lock()
             .map_err(|_| unavailable())?
@@ -61,6 +64,13 @@ impl Storage {
     }
 
     pub(crate) fn open(directory: &Path) -> Result<Self, AppError> {
+        Self::open_with_barrier(directory, None)
+    }
+
+    pub(crate) fn open_with_barrier(
+        directory: &Path,
+        barrier: Option<&Path>,
+    ) -> Result<Self, AppError> {
         if !directory.exists() {
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
@@ -100,7 +110,7 @@ impl Storage {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|_| unavailable())?;
-        if version > 5 {
+        if version > 6 {
             return Err(AppError::bad_request(
                 "La base usa un esquema más reciente; utiliza una versión compatible de mddiff.",
             ));
@@ -190,10 +200,179 @@ impl Storage {
                 .map_err(|_| unavailable())?;
             transaction.commit().map_err(|_| unavailable())?;
         }
-        Ok(Self {
+        if version < 6 {
+            let transaction = connection.transaction().map_err(|_| unavailable())?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE privacy_guard (
+                singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+                generation INTEGER NOT NULL CHECK (generation>=0),
+                revision_floor INTEGER NOT NULL CHECK (revision_floor>=0)
+            ); PRAGMA user_version=6;",
+                )
+                .map_err(|_| unavailable())?;
+            transaction.commit().map_err(|_| unavailable())?;
+        }
+        let directory = fs::canonicalize(directory).map_err(|_| unavailable())?;
+        let barrier = barrier
+            .map(|path| Barrier::load(path, &directory))
+            .transpose()?;
+        let store = Self {
             connection: Mutex::new(connection),
-            directory: fs::canonicalize(directory).map_err(|_| unavailable())?,
-        })
+            directory,
+            barrier,
+        };
+        store.apply_erasures()?;
+        Ok(store)
+    }
+
+    pub(crate) fn check_barrier(&self) -> Result<(), AppError> {
+        if let Some(barrier) = &self.barrier {
+            barrier.unchanged()?;
+        }
+        Ok(())
+    }
+
+    fn apply_erasures(&self) -> Result<(), AppError> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let previous: Option<(i64, i64)> = connection
+            .query_row(
+                "SELECT generation,revision_floor FROM privacy_guard WHERE singleton=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| unavailable())?;
+        let Some(barrier) = &self.barrier else {
+            return if previous.is_some() {
+                Err(AppError::bad_request(
+                    "Esta base requiere el registro externo de privacidad; no se permite abrirla sin su barrera.",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if previous.is_some_and(|(generation, floor)| {
+            generation < 0
+                || floor < 0
+                || generation > barrier.journal.generation as i64
+                || floor > barrier.journal.revision_floor as i64
+                || (barrier.journal.generation - generation as u64)
+                    .checked_mul(REVISION_SPAN)
+                    .and_then(|span| (floor as u64).checked_add(span))
+                    .is_none_or(|minimum| barrier.journal.revision_floor < minimum)
+        }) {
+            return Err(AppError::bad_request(
+                "El registro de privacidad es anterior al ya aplicado; conserva el mantenimiento y recupera el registro vigente.",
+            ));
+        }
+        // Once requested, the external barrier remains mandatory even if classification fails.
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO privacy_guard(singleton,generation,revision_floor) VALUES(1,0,0)",
+                [],
+            )
+            .map_err(|_| unavailable())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| unavailable())?;
+        let rows: Vec<(String, String, i64, bool, bool, Option<String>)> = {
+            let mut statement = transaction.prepare("SELECT issuer,subject,revision,base_label IS NOT NULL,candidate_label IS NOT NULL,jira_privacy FROM current_work").map_err(|_| unavailable())?;
+            statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .map_err(|_| unavailable())?
+                .collect::<Result<_, _>>()
+                .map_err(|_| unavailable())?
+        };
+        for (issuer, subject, revision, base, candidate, raw) in rows {
+            barrier.accept_revision(u64::try_from(revision).map_err(|_| unavailable())?)?;
+            let mut inventory: WorkPrivacy = match raw {
+                Some(raw) => serde_json::from_str(&raw).map_err(|_| unavailable())?,
+                None => WorkPrivacy {
+                    base: JiraData {
+                        unclassified: base,
+                        ..JiraData::default()
+                    },
+                    candidate: JiraData {
+                        unclassified: candidate,
+                        ..JiraData::default()
+                    },
+                },
+            };
+            let (erase_base, erase_candidate) = barrier.affected(&inventory)?;
+            if !(erase_base || erase_candidate) {
+                continue;
+            }
+            let next = revision
+                .checked_add(1)
+                .filter(|n| *n > 0)
+                .ok_or_else(unavailable)?
+                .max(barrier.journal.revision_floor as i64);
+            barrier.accept_revision(next as u64)?;
+            if erase_base {
+                inventory.base = JiraData::default();
+            }
+            if erase_candidate {
+                inventory.candidate = JiraData::default();
+            }
+            transaction
+                .execute(
+                    "UPDATE current_work SET revision=?3,
+                base_label=CASE WHEN ?4 THEN NULL ELSE base_label END,
+                base_markdown=CASE WHEN ?4 THEN NULL ELSE base_markdown END,
+                base_source=CASE WHEN ?4 THEN NULL ELSE base_source END,
+                base_input=CASE WHEN ?4 THEN NULL ELSE base_input END,
+                candidate_label=CASE WHEN ?5 THEN NULL ELSE candidate_label END,
+                candidate_markdown=CASE WHEN ?5 THEN NULL ELSE candidate_markdown END,
+                candidate_input=CASE WHEN ?5 THEN NULL ELSE candidate_input END,
+                jira_privacy=?6 WHERE issuer=?1 AND subject=?2",
+                    params![
+                        issuer,
+                        subject,
+                        next,
+                        erase_base,
+                        erase_candidate,
+                        serde_json::to_string(&inventory).map_err(|_| unavailable())?
+                    ],
+                )
+                .map_err(|_| unavailable())?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO privacy_guard(singleton,generation,revision_floor) VALUES(1,?1,?2)
+            ON CONFLICT(singleton) DO UPDATE SET generation=excluded.generation,revision_floor=excluded.revision_floor",
+                [barrier.journal.generation as i64,barrier.journal.revision_floor as i64],
+            )
+            .map_err(|_| unavailable())?;
+        barrier.unchanged()?;
+        transaction.commit().map_err(|_| unavailable())?;
+        if !barrier.journal.accounts.is_empty() {
+            let busy: i64 = connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+                .map_err(|_| unavailable())?;
+            if busy != 0 {
+                return Err(unavailable());
+            }
+            connection
+                .execute_batch("VACUUM;")
+                .map_err(|_| unavailable())?;
+            let busy: i64 = connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+                .map_err(|_| unavailable())?;
+            if busy != 0 {
+                return Err(unavailable());
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn directory(&self) -> &Path {
@@ -367,6 +546,9 @@ impl Storage {
         work: &Work,
         connection_generation: Option<u64>,
     ) -> Result<u64, AppError> {
+        if let Some(barrier) = &self.barrier {
+            barrier.accept(&work.jira_privacy)?;
+        }
         let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -408,6 +590,9 @@ impl Storage {
         let next = revision
             .checked_add(1)
             .ok_or_else(|| AppError::bad_request("La revisión alcanzó el límite admitido."))?;
+        if let Some(barrier) = &self.barrier {
+            barrier.accept_revision(next as u64)?;
+        }
         let source = work
             .base_source
             .as_ref()
@@ -437,6 +622,7 @@ impl Storage {
             base_input=excluded.base_input,candidate_input=excluded.candidate_input,jira_privacy=excluded.jira_privacy",
             params![owner.issuer,owner.subject,next,base.map(|d| &d.label),base.map(|d| &d.markdown),
                 candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source,base_input,candidate_input,jira_privacy]).map_err(|_| unavailable())?;
+        self.check_barrier()?;
         transaction.commit().map_err(|_| unavailable())?;
         Ok(next as u64)
     }
