@@ -21,6 +21,8 @@ jobs:
         run: cargo +stable clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo +stable test --locked
+      - name: Test Jira privacy inventory and reporting protocol
+        run: python3 scripts/test_jira_privacy_report.py
       - name: Build release
         run: cargo +stable build --release --locked
       - name: Test MCP and viewer updates
