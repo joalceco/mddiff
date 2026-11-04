@@ -105,6 +105,8 @@ El 2026-11-04, con el secreto externo privado configurado, la cuenta propietaria
 
 La consola de Atlassian exige una atestación sobre **Personal Data Reporting API** para aplicaciones que almacenan datos personales antes de habilitar Sharing. Esa API no está implementada en mddiff. [#17](https://github.com/joalceco/mddiff/issues/17) conserva este bloqueo; no se ha emitido la atestación ni se habilita autorización para otras cuentas. Consulta [la configuración de consentimiento](personal-connections.md#consentimiento-de-jira-cloud) para separar la aplicación privada de su distribución.
 
+La rama incorpora el [inventario privado de cuentas y antigüedad](jira-privacy.md) en SQLite 5, todavía sin desplegar. Ese avance no acredita el reporte periódico, el borrado de respaldos ni la distribución a invitados.
+
 ## Fuentes primarias
 
 Consultadas el 2026-10-29: [REST API Jira Cloud v3](https://developer.atlassian.com/cloud/jira/platform/rest/v3/), [Get issue y campos solicitados](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get), [estructura de ADF](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/), [marcas de enlace](https://developer.atlassian.com/cloud/jira/platform/apis/document/marks/link/) y [celdas combinadas](https://developer.atlassian.com/cloud/jira/platform/apis/document/nodes/table_cell/).

@@ -102,10 +102,14 @@ def main():
                     phase = "warnings and proposal-only agent writes"
                     provider.issues["alice", "PROJ-1"]["fields"]["description"] = {"type": "doc", "version": 1, "content": [
                         {"type": "paragraph", "content": [{"type": "text", "text": "Supported"}]},
+                        {"type": "paragraph", "content": [{"type": "mention", "attrs": {
+                            "id": "synthetic:mentioned-person", "text": "@Synthetic Mention", "userType": "DEFAULT"}}]},
                         {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"id": "synthetic-no-download", "type": "file"}}]}]}
                     check(capture(alice, provider)[0] == 200, "Unsupported ADF content was not represented safely.")
                     streams[0].revision(before["revision"] + 1)
                     current = work(alice, provider)
+                    check("jira_privacy" not in current and "jira_privacy" not in snapshot(alice, provider), "Private inventory leaked through the work API or viewer snapshot.")
+                    privacy_captured_at = current["base_source"]["captured_at"]
                     check(current["base_source"].get("warnings") and "synthetic-no-download" in current["base"]["markdown"], "Unsupported ADF disappeared without a visible warning or fallback.")
                     env = SimpleNamespace(base=base, trust=None, runtime=runtime)
                     result = tool(env, token(env), "submit_proposal", {"expected_revision": current["revision"], "candidate": {"label": "agent.md", "markdown": "# Agent\n"}})
@@ -185,9 +189,18 @@ def main():
                 with closing(sqlite3.connect(data / "work.sqlite3")) as connection:
                     rows = connection.execute("SELECT base_source FROM current_work").fetchall()
                     check(len(rows) == 2 and all(json.loads(row[0])["converter"] == "adf-md-v1" for row in rows), "Jira source did not persist by owner.")
+                    inventory_before = connection.execute("SELECT subject,jira_privacy FROM current_work ORDER BY subject").fetchall()
+                    copies = [json.loads(row[1]) for row in inventory_before]
+                    mentioned = [item for item in copies if item["base"]["accounts"]]
+                    check(len(mentioned) == 1 and mentioned[0]["base"]["accounts"] == {"synthetic:mentioned-person": privacy_captured_at}
+                          and mentioned[0]["candidate"]["accounts"] == mentioned[0]["base"]["accounts"]
+                          and not mentioned[0]["base"]["unclassified"], "Structured Jira mention and derived proposal inventory did not persist privately with the retrieval time.")
                 with application(base, oidc, config, data):
                     alice, bob = login(runtime, base)
                     check([work(alice, provider), work(bob, provider)] == expected, "Restart changed Jira conversion or private content.")
+                with closing(sqlite3.connect(data / "work.sqlite3")) as connection:
+                    check(connection.execute("SELECT subject,jira_privacy FROM current_work ORDER BY subject").fetchall() == inventory_before,
+                          "Restart changed the private Jira inventory.")
                 provider.assert_read_only()
         print("Jira source: personal OAuth, site-scoped audited GETs, deterministic ADF/warnings, failures/limits, owner/CAS/disconnect races, agent preservation and restart passed.")
     except CheckFailed as error:

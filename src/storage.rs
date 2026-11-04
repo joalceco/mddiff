@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AppError,
+    privacy::WorkPrivacy,
     workspace::{Document, InputMetadata, SourceMetadata, VerifiedIdentity, Work},
 };
 
@@ -99,7 +100,7 @@ impl Storage {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(|_| unavailable())?;
-        if version > 4 {
+        if version > 5 {
             return Err(AppError::bad_request(
                 "La base usa un esquema más reciente; utiliza una versión compatible de mddiff.",
             ));
@@ -175,6 +176,16 @@ impl Storage {
                  ALTER TABLE current_work ADD COLUMN candidate_input TEXT
                     CHECK (candidate_label IS NOT NULL OR candidate_input IS NULL);
                  PRAGMA user_version=4;",
+                )
+                .map_err(|_| unavailable())?;
+            transaction.commit().map_err(|_| unavailable())?;
+        }
+        if version < 5 {
+            let transaction = connection.transaction().map_err(|_| unavailable())?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE current_work ADD COLUMN jira_privacy TEXT;
+                 PRAGMA user_version=5;",
                 )
                 .map_err(|_| unavailable())?;
             transaction.commit().map_err(|_| unavailable())?;
@@ -292,7 +303,7 @@ impl Storage {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         connection
             .query_row(
-                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source, base_input, candidate_input
+                "SELECT revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source, base_input, candidate_input, jira_privacy
             FROM current_work WHERE issuer=?1 AND subject=?2",
                 params![owner.issuer, owner.subject],
                 |row| {
@@ -308,6 +319,18 @@ impl Storage {
                     let input = |index| -> rusqlite::Result<Option<InputMetadata>> {
                         let raw: Option<String> = row.get(index)?;
                         raw.map(|s| serde_json::from_str(&s).map_err(|_| rusqlite::Error::InvalidQuery)).transpose()
+                    };
+                    let privacy: Option<String> = row.get(8)?;
+                    let jira_privacy = match privacy {
+                        Some(raw) => serde_json::from_str::<WorkPrivacy>(&raw)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        None => {
+                            let mut legacy = WorkPrivacy::default();
+                            // Earlier proposals may have outlived their Jira source metadata.
+                            legacy.base.unclassified = base_label.is_some();
+                            legacy.candidate.unclassified = candidate_label.is_some();
+                            legacy
+                        }
                     };
                     Ok(Work {
                         revision: revision as u64,
@@ -328,6 +351,7 @@ impl Storage {
                         base_source,
                         base_input: input(6)?,
                         candidate_input: input(7)?,
+                        jira_privacy,
                     })
                 },
             )
@@ -404,14 +428,15 @@ impl Storage {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|_| unavailable())?;
+        let jira_privacy = serde_json::to_string(&work.jira_privacy).map_err(|_| unavailable())?;
         transaction.execute("INSERT INTO current_work
-            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown,base_source,base_input,candidate_input)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(issuer,subject) DO UPDATE SET
+            (issuer,subject,revision,base_label,base_markdown,candidate_label,candidate_markdown,base_source,base_input,candidate_input,jira_privacy)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(issuer,subject) DO UPDATE SET
             revision=excluded.revision,base_label=excluded.base_label,base_markdown=excluded.base_markdown,
             candidate_label=excluded.candidate_label,candidate_markdown=excluded.candidate_markdown,base_source=excluded.base_source,
-            base_input=excluded.base_input,candidate_input=excluded.candidate_input",
+            base_input=excluded.base_input,candidate_input=excluded.candidate_input,jira_privacy=excluded.jira_privacy",
             params![owner.issuer,owner.subject,next,base.map(|d| &d.label),base.map(|d| &d.markdown),
-                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source,base_input,candidate_input]).map_err(|_| unavailable())?;
+                candidate.map(|d| &d.label),candidate.map(|d| &d.markdown),source,base_input,candidate_input,jira_privacy]).map_err(|_| unavailable())?;
         transaction.commit().map_err(|_| unavailable())?;
         Ok(next as u64)
     }

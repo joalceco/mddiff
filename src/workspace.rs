@@ -12,6 +12,7 @@ use crate::{
     AppError, MAX_DOCUMENT_BYTES,
     connections::Provider,
     diff,
+    privacy::{JiraData, WorkPrivacy},
     storage::{Storage, conflict},
 };
 
@@ -116,6 +117,8 @@ pub struct Work {
     pub base_input: Option<InputMetadata>,
     #[serde(skip_serializing)]
     pub candidate_input: Option<InputMetadata>,
+    #[serde(skip)]
+    pub jira_privacy: WorkPrivacy,
 }
 
 #[derive(Serialize)]
@@ -438,6 +441,22 @@ impl Workspace {
                 candidate_kind.unwrap_or(InputKind::Api),
             ))
         };
+        let jira_privacy = WorkPrivacy {
+            base: if same_base {
+                previous.jira_privacy.base.clone()
+            } else {
+                JiraData::default()
+            },
+            candidate: if candidate.is_none() {
+                JiraData::default()
+            } else if same_candidate {
+                previous.jira_privacy.candidate.clone()
+            } else if candidate_kind.is_none() {
+                previous.jira_privacy.candidate_copy()
+            } else {
+                JiraData::default()
+            },
+        };
         self.update(Some(expected), None, move || {
             Ok(Work {
                 base: Some(base),
@@ -445,6 +464,7 @@ impl Workspace {
                 base_source,
                 base_input,
                 candidate_input,
+                jira_privacy,
                 ..Work::default()
             })
         })
@@ -491,6 +511,14 @@ impl Workspace {
         // The update checks the same revision again under the owner's lock.
         let base_source = work.base_source.clone();
         let base_input = work.base_input.clone();
+        let jira_privacy = WorkPrivacy {
+            base: work.jira_privacy.base.clone(),
+            candidate: if matches!(kind, InputKind::Agent | InputKind::Api) {
+                work.jira_privacy.candidate_copy()
+            } else {
+                work.jira_privacy.base.clone()
+            },
+        };
         self.update(Some(expected), None, move || {
             Ok(Work {
                 base: Some(base),
@@ -498,6 +526,7 @@ impl Workspace {
                 base_source,
                 base_input,
                 candidate_input: Some(InputMetadata::capture(kind)),
+                jira_privacy,
                 ..Work::default()
             })
         })
@@ -511,6 +540,28 @@ impl Workspace {
         source: SourceMetadata,
         connection_generation: u64,
     ) -> Result<Arc<Snapshot>, AppError> {
+        let privacy = JiraData {
+            unclassified: source.provider == Provider::Jira,
+            ..JiraData::default()
+        };
+        self.capture_base_with_privacy_if_revision(
+            expected,
+            base,
+            source,
+            connection_generation,
+            privacy,
+        )
+        .await
+    }
+
+    pub async fn capture_base_with_privacy_if_revision(
+        self: &Arc<Self>,
+        expected: u64,
+        base: Document,
+        source: SourceMetadata,
+        connection_generation: u64,
+        privacy: JiraData,
+    ) -> Result<Arc<Snapshot>, AppError> {
         if self.storage.is_none() {
             return Err(AppError::bad_request(
                 "La captura de fuentes requiere almacenamiento alojado.",
@@ -522,12 +573,17 @@ impl Workspace {
         }
         let candidate = work.candidate.clone();
         let candidate_input = work.candidate_input.clone();
+        let jira_privacy = WorkPrivacy {
+            base: privacy,
+            candidate: work.jira_privacy.candidate.clone(),
+        };
         self.update(Some(expected), Some(connection_generation), move || {
             Ok(Work {
                 base: Some(base),
                 candidate,
                 base_source: Some(source),
                 candidate_input,
+                jira_privacy,
                 ..Work::default()
             })
         })
@@ -612,6 +668,15 @@ impl Workspace {
 }
 
 fn prepare(work: Work, validate_labels: bool, started: Instant) -> Result<Current, AppError> {
+    if !work.jira_privacy.base.valid()
+        || !work.jira_privacy.candidate.valid()
+        || (work.base.is_none() && work.jira_privacy.base != JiraData::default())
+        || (work.candidate.is_none() && work.jira_privacy.candidate != JiraData::default())
+    {
+        return Err(AppError::bad_request(
+            "El inventario privado de Jira no es válido.",
+        ));
+    }
     if work.base.is_none() && work.base_source.is_some() {
         return Err(AppError::bad_request(
             "La procedencia requiere un documento original.",
@@ -752,6 +817,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jira_inventory_survives_derived_proposals_source_changes_restart_and_owner_isolation()
+    {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        let inventory = |id: &str, at| JiraData {
+            accounts: std::collections::BTreeMap::from([(id.into(), at)]),
+            unclassified: false,
+        };
+        let mut metadata = source();
+        metadata.provider = Provider::Jira;
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            store
+                .storage
+                .as_ref()
+                .unwrap()
+                .replace_connection(
+                    &owner,
+                    "jira",
+                    "notes",
+                    0,
+                    Some(crate::storage::EncryptedCredential {
+                        nonce: [0; 12],
+                        ciphertext: vec![0; 16],
+                    }),
+                )
+                .unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            workspace
+                .capture_base_with_privacy_if_revision(
+                    0,
+                    document("first source"),
+                    metadata.clone(),
+                    1,
+                    inventory("synthetic:first", 100),
+                )
+                .await
+                .unwrap();
+            workspace
+                .propose_if_revision(1, document("derived proposal"))
+                .await
+                .unwrap();
+            workspace
+                .capture_base_with_privacy_if_revision(
+                    2,
+                    document("second source"),
+                    metadata.clone(),
+                    1,
+                    inventory("synthetic:second", 200),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                workspace.work().await.jira_privacy.candidate,
+                inventory("synthetic:first", 100)
+            );
+            workspace
+                .propose_if_revision(3, document("revised derived proposal"))
+                .await
+                .unwrap();
+            let before = workspace.work().await;
+            assert_eq!(before.jira_privacy.candidate.accounts.len(), 2);
+            assert!(
+                workspace
+                    .capture_base_with_privacy_if_revision(
+                        3,
+                        document("late source"),
+                        metadata.clone(),
+                        1,
+                        inventory("synthetic:late", 300)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(workspace.work().await.jira_privacy, before.jira_privacy);
+            assert!(
+                !serde_json::to_string(before.as_ref())
+                    .unwrap()
+                    .contains("jira_privacy")
+            );
+            assert_eq!(
+                store
+                    .for_user(&identity("issuer", "bob"))
+                    .await
+                    .unwrap()
+                    .work()
+                    .await
+                    .jira_privacy,
+                WorkPrivacy::default()
+            );
+        }
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            assert_eq!(workspace.work().await.revision, 4);
+            assert_eq!(
+                workspace.work().await.jira_privacy.candidate.accounts["synthetic:first"],
+                100
+            );
+            workspace
+                .replace_with_inputs_if_revision(
+                    4,
+                    document("manual base"),
+                    Some(document("revised derived proposal")),
+                    Some(InputKind::File),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                workspace.work().await.jira_privacy.base,
+                JiraData::default()
+            );
+            assert_eq!(
+                workspace.work().await.jira_privacy.candidate.accounts.len(),
+                2
+            );
+            workspace
+                .propose_with_input_if_revision(5, document("new manual file"), InputKind::File)
+                .await
+                .unwrap();
+            assert_eq!(workspace.work().await.jira_privacy, WorkPrivacy::default());
+            workspace
+                .capture_base_with_privacy_if_revision(
+                    6,
+                    document("latest source"),
+                    metadata,
+                    1,
+                    inventory("synthetic:first", 400),
+                )
+                .await
+                .unwrap();
+            workspace.clear_if_revision(7).await.unwrap();
+        }
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        assert_eq!(
+            store
+                .for_user(&owner)
+                .await
+                .unwrap()
+                .work()
+                .await
+                .jira_privacy,
+            WorkPrivacy::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_four_jira_is_preserved_and_flagged_for_reclassification() {
+        let directory = Database::new();
+        let owner = identity("issuer", "alice");
+        {
+            let store = Workspaces::persistent(&directory.0).unwrap();
+            let workspace = store.for_user(&owner).await.unwrap();
+            workspace
+                .replace_if_revision(
+                    0,
+                    document("legacy original"),
+                    Some(document("legacy proposal")),
+                )
+                .await
+                .unwrap();
+        }
+        let database = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
+        let mut metadata = source();
+        metadata.provider = Provider::Jira;
+        database
+            .execute(
+                "UPDATE current_work SET base_source=?1, base_input=NULL",
+                [serde_json::to_string(&metadata).unwrap()],
+            )
+            .unwrap();
+        database
+            .execute_batch(
+                "ALTER TABLE current_work DROP COLUMN jira_privacy; PRAGMA user_version=4;",
+            )
+            .unwrap();
+        drop(database);
+        let store = Workspaces::persistent(&directory.0).unwrap();
+        let workspace = store.for_user(&owner).await.unwrap();
+        let work = workspace.work().await;
+        assert_eq!(work.base.as_ref().unwrap().markdown, "legacy original");
+        assert_eq!(work.candidate.as_ref().unwrap().markdown, "legacy proposal");
+        assert!(work.jira_privacy.base.unclassified && work.jira_privacy.candidate.unclassified);
+        assert!(work.jira_privacy.base.accounts.is_empty());
+        workspace
+            .propose_if_revision(1, document("new derived proposal"))
+            .await
+            .unwrap();
+        assert!(workspace.work().await.jira_privacy.candidate.unclassified);
+    }
+
+    #[tokio::test]
     async fn input_capture_is_durable_preserves_unchanged_sides_and_clears_on_delete() {
         let directory = Database::new();
         let owner = identity("issuer", "alice");
@@ -847,7 +1105,7 @@ mod tests {
                 .unwrap();
         }
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
-        connection.execute_batch("ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=3;").unwrap();
+        connection.execute_batch("ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=3;").unwrap();
         drop(connection);
         let store = Workspaces::persistent(&directory.0).unwrap();
         let workspace = store.for_user(&owner).await.unwrap();
@@ -1380,7 +1638,7 @@ mod tests {
         let database = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
         database
             .execute_batch(
-                "ALTER TABLE current_work DROP COLUMN base_source; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=2;",
+                "ALTER TABLE current_work DROP COLUMN jira_privacy; ALTER TABLE current_work DROP COLUMN base_source; ALTER TABLE current_work DROP COLUMN base_input; ALTER TABLE current_work DROP COLUMN candidate_input; PRAGMA user_version=2;",
             )
             .unwrap();
         drop(database);
@@ -1409,13 +1667,13 @@ mod tests {
                 .database_for_test()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 
     #[test]
     fn ordinary_document_inputs_cannot_claim_source_metadata() {
-        for key in ["source", "base_source"] {
+        for key in ["source", "base_source", "jira_privacy"] {
             let mut forged = serde_json::json!({"label":"pasted.md", "markdown":"# Pasted"});
             forged[key] = serde_json::to_value(source()).unwrap();
             assert!(serde_json::from_value::<Document>(forged).is_err());
@@ -1695,7 +1953,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
         let columns: i32 = connection
             .query_row(
@@ -1704,8 +1962,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(columns, 10);
-        connection.pragma_update(None, "user_version", 5).unwrap();
+        assert_eq!(columns, 11);
+        connection.pragma_update(None, "user_version", 6).unwrap();
         drop(connection);
         assert!(Workspaces::persistent(&directory.0).is_err());
         let connection = rusqlite::Connection::open(directory.0.join("work.sqlite3")).unwrap();
@@ -1713,7 +1971,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 

@@ -766,7 +766,7 @@ impl Providers {
         reference: &str,
         capacity: crate::RequestCapacity,
         workspace: &mddiff::workspace::Workspace,
-    ) -> Result<(Document, SourceMetadata, u64), AppError> {
+    ) -> Result<(Document, SourceMetadata, u64, mddiff::privacy::JiraData), AppError> {
         let d = self.destination(destination)?;
         if d.provider != Provider::Jira {
             return Err(AppError::bad_request("Elige una conexión de Jira Cloud."));
@@ -794,6 +794,7 @@ impl Providers {
                 true,
             )
             .await?;
+        let retrieved_at = now();
         let canonical = issue["key"].as_str().ok_or_else(failed)?.to_owned();
         if issue_key(&canonical, &d.url).ok().as_deref() != Some(canonical.as_str()) {
             return Err(failed());
@@ -824,10 +825,12 @@ impl Providers {
             })?;
         let compute = workspace.compute_permit().await?;
         // Conversion shares the diff budget and retains capacity after caller cancellation.
-        let mut converted = tokio::task::spawn_blocking(move || {
+        let (mut converted, privacy) = tokio::task::spawn_blocking(move || {
             let _capacity = capacity;
             let _compute = compute;
-            mddiff::adf::convert(&description)
+            let converted = mddiff::adf::convert(&description)?;
+            let privacy = mddiff::privacy::JiraData::from_adf(&description, retrieved_at)?;
+            Ok::<_, AppError>((converted, privacy))
         })
         .await
         .map_err(|_| failed())?
@@ -857,13 +860,14 @@ impl Providers {
                     .join(&format!("/browse/{canonical}"))
                     .map_err(|_| failed())?
                     .into(),
-                captured_at: now(),
+                captured_at: retrieved_at,
                 updated_at,
                 title: Some(title),
                 converter: Some(mddiff::adf::VERSION.into()),
                 warnings: converted.warnings,
             },
             generation,
+            privacy,
         ))
     }
 
@@ -1043,7 +1047,7 @@ async fn capture_issue(
         ));
     }
     let p = providers(&app)?;
-    let (base, source, generation) = p
+    let (base, source, generation, privacy) = p
         .read_issue(
             &owner,
             &input.destination,
@@ -1063,7 +1067,13 @@ async fn capture_issue(
         return Err(failed());
     }
     workspace
-        .capture_base_if_revision(input.expected_revision, base, source, generation)
+        .capture_base_with_privacy_if_revision(
+            input.expected_revision,
+            base,
+            source,
+            generation,
+            privacy,
+        )
         .await
         .map(Json)
 }

@@ -127,9 +127,9 @@ Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se 
 
 ### Actualizar una base alojada
 
-El almacenamiento actual usa el **esquema SQLite 4**. Al abrir una base de esquema 3, la aplicación añade los metadatos opcionales de origen y recepción de ambos lados dentro de una transacción. Conserva Markdown, revisiones, procedencia externa y conexiones existentes. Los trabajos antiguos no reciben fechas de importación inventadas.
+La rama usa el **esquema SQLite 5**; la beta publicada conserva SQLite 4. La migración 4→5 añade el [inventario privado de Jira](docs/planning/jira-privacy.md), sin cambiar Markdown, revisiones, procedencia o conexiones. Los documentos anteriores quedan pendientes de clasificación; no reciben identificadores ni fechas inventados. El reporte periódico y el borrado en respaldos siguen pendientes.
 
-Antes de actualizar, activa mantenimiento, detén el escritor y conserva una copia coherente de datos, claves y configuración, junto con la imagen anterior. Un binario que solo admite el esquema 3 no puede abrir la base migrada al 4: un rollback que lo requiera debe recuperar el checkpoint compatible, sin reducir manualmente `user_version`. Una base con esquema futuro se rechaza. Consulta [el trabajo persistente](docs/planning/current-work.md) y [la recuperación operativa](docs/planning/beta-operations.md).
+Antes de actualizar, activa mantenimiento, detén el escritor y conserva una copia coherente de datos, claves y configuración, junto con la imagen anterior. Un binario que solo admite el esquema 4 no puede abrir la base migrada al 5: un rollback que lo requiera debe recuperar el checkpoint compatible, sin reducir manualmente `user_version`. Una base con esquema futuro se rechaza. La operación del esquema 5 todavía debe verificarse antes de desplegar esta rama. Consulta [el trabajo persistente](docs/planning/current-work.md) y [la recuperación operativa](docs/planning/beta-operations.md).
 
 ### Ejecutar hosted en un contenedor
 
