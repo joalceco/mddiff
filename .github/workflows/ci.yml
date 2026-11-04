@@ -26,7 +26,9 @@ jobs:
       - name: Build release
         run: cargo +stable build --release --locked
       - name: Test external erasure barrier and stale checkpoint recovery
-        run: python3 scripts/test_jira_erasure.py
+        run: |
+          python3 scripts/test_jira_erasure.py
+          python3 scripts/test_jira_privacy_recovery.py
       - name: Test MCP and viewer updates
         run: python3 scripts/test_mcp.py
       - name: Test local and hosted mode boundaries
@@ -74,6 +76,8 @@ jobs:
           docker compose -f deploy/compose.yaml -f deploy/compose.privacy.yaml config --quiet
       - name: Build the Linux image
         run: docker build --tag mddiff:ci .
+      - name: Test privacy journal ownership and read-only container mounts
+        run: sudo -n python3 scripts/test_privacy_container.py --image mddiff:ci
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test isolated hosted container and persistent volumes

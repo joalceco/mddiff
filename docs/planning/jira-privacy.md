@@ -90,7 +90,13 @@ El estado de reporting y la credencial del operador deben estar en **otro direct
 
 Una copia protegida de SQLite 6 se vuelve a filtrar al abrirla con el registro vigente. La prueba del binario real recupera un checkpoint previo al borrado y comprueba que no reaparecen los documentos ni aumenta otra vez la revisión tras repetir el proceso.
 
-**Los helpers del cluster todavía no aplican esta política.** Antes de activar el servicio deben conservar el registro externo vigente, imponer su montaje/argumento y rechazar imágenes anteriores a la barrera. Un checkpoint de esquema 4 o 5 no contiene la marca que hace obligatorio el registro; no se debe recuperar su configuración o binario antiguo y abrir internet. La prueba de CLI no demuestra la recuperación completa de restic, IdP, secretos y configuración.
+[`scripts/jira_privacy_recovery.py`](../../scripts/jira_privacy_recovery.py) prepara una copia de recuperación antes de sustituir los datos en uso. Los helpers privados de recuperación completa y rollback de la aplicación usan el mismo preparador. Verifica el registro externo vigente y su montaje de directorio de solo lectura, filtra la copia con la CLI y comprueba esquema, integridad, generación y piso de revisión. Si el registro cambia durante el proceso, falla sin sustituir el estado en uso.
+
+Los checkpoints de esquema 3–5 se migran con la imagen compatible de esquema 6 ya instalada; su imagen y configuración antiguas no se vuelven a servir. Un checkpoint de esquema 6 puede seleccionar su propia imagen compatible, conservando el argumento y montaje de la barrera vigentes. Los documentos antiguos sin inventario suficiente siguen bloqueando la recuperación; no se descartan para hacerla pasar.
+
+El operador debe verificar el archivo de respaldo, la imagen y la compatibilidad de la identidad y la clave de conexiones **antes** de llamar al preparador. Los helpers privados conservan la configuración OAuth vigente y el código actual de recuperación, para que un respaldo antiguo no los reemplace. El registro permanece fuera de los directorios restaurados. En un host nuevo se requiere instalar primero una versión compatible y recuperar el registro autorizado por separado; la herramienta no inventa decisiones perdidas.
+
+**Los helpers instalados en el cluster aún no aplican esta política.** La preparación y las pruebas locales no acreditan su despliegue ni la recuperación completa de restic, IdP, secretos y configuración. La barrera tampoco sustituye el bloqueo de mantenimiento ni el bloqueo del operador que coordina respaldos y restauraciones.
 
 Los snapshots cifrados anteriores no se reescriben ni se eliminan por publicar el registro. El borrado de un checkpoint de prueba tampoco acredita que se hayan tratado todas las copias retenidas. Por eso `stage-erasure` y el binario **no vacían las acciones pendientes** del reporter: falta verificar el conjunto de copias y los controles de restauración antes de confirmar cumplimiento.
 
@@ -98,7 +104,10 @@ Para probar el flujo con bases y decisiones sintéticas, después de compilar re
 
 ```sh
 python3 scripts/test_jira_erasure.py
+python3 scripts/test_jira_privacy_recovery.py
 ```
+
+El CI de contenedor ejecuta además `scripts/test_privacy_container.py` como operador root, usando solo datos sintéticos. Comprueba lectura como UID `10001`, publicación atómica desde root sin perder propietario/permisos, lectura del registro nuevo y rechazo de escritura sobre el montaje. No requiere credenciales de Atlassian.
 
 ## Trabajo necesario antes de Sharing
 

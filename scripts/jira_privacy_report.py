@@ -254,6 +254,24 @@ def report(accounts, path, token, now, send=post_report, clock=None):
         return {"reported": sent, "deferred": len(accounts) - sent, "pending": len(state["pending"])}
 
 
+def read_journal(path, now, minimum=(0, 0)):
+    private_parent(path)
+    journal = private_read(path)
+    generation, floor = minimum
+    require(isinstance(journal, dict) and set(journal) == {"version", "generation", "revision_floor", "accounts"}
+            and type(journal["version"]) is int and journal["version"] == 1
+            and type(journal["generation"]) is int and generation <= journal["generation"] < 2**63
+            and type(journal["revision_floor"]) is int and floor <= journal["revision_floor"] <= MAX_SAFE_REVISION - REVISION_SPAN
+            and journal["revision_floor"] >= floor + (journal["generation"] - generation) * REVISION_SPAN
+            and isinstance(journal["accounts"], dict) and len(journal["accounts"]) <= 1_000_000
+            and (journal["generation"] != 0 or not journal["accounts"]), "Invalid or rolled-back erasure journal.")
+    for key, rule in journal["accounts"].items():
+        require(account_id(key) and isinstance(rule, dict) and set(rule) == {"status", "received_at"}
+                and rule["status"] in ("closed", "updated") and type(rule["received_at"]) is int
+                and 0 < rule["received_at"] <= now, "Invalid erasure decision.")
+    return journal
+
+
 def stage_erasures(database, path, journal_path, now, create=False):
     """Publish a monotonic external barrier only while the current database is exclusively locked."""
     database, path, journal_path = Path(database), Path(path), Path(journal_path)
@@ -286,18 +304,7 @@ def stage_erasures(database, path, journal_path, now, create=False):
                 write_state(journal_path, journal, owner=journal_owner)
             else:
                 require(applied is not None, "The current database has not activated an external barrier.")
-                journal = private_read(journal_path)
-                require(isinstance(journal, dict) and set(journal) == {"version", "generation", "revision_floor", "accounts"}
-                        and type(journal["version"]) is int and journal["version"] == 1
-                        and type(journal["generation"]) is int and applied[0] <= journal["generation"] < 2**63
-                        and type(journal["revision_floor"]) is int and applied[1] <= journal["revision_floor"] <= MAX_SAFE_REVISION - REVISION_SPAN
-                        and journal["revision_floor"] >= applied[1] + (journal["generation"] - applied[0]) * REVISION_SPAN
-                        and isinstance(journal["accounts"], dict) and len(journal["accounts"]) <= 1_000_000
-                        and (journal["generation"] != 0 or not journal["accounts"]), "Invalid or rolled-back erasure journal.")
-                for key, rule in journal["accounts"].items():
-                    require(account_id(key) and isinstance(rule, dict) and set(rule) == {"status", "received_at"}
-                            and rule["status"] in ("closed", "updated") and type(rule["received_at"]) is int
-                            and 0 < rule["received_at"] <= now, "Invalid erasure decision.")
+                journal = read_journal(journal_path, now, applied)
                 changed = False
                 for key, decision in state["pending"].items():
                     old = journal["accounts"].get(key)
