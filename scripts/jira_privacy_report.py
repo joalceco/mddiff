@@ -18,8 +18,10 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 ENDPOINT = "https://api.atlassian.com/app/report-accounts/"
+TOKEN_ENDPOINT = "https://auth.atlassian.com/oauth/token"
 DAY = 86400
 DEFAULT_CYCLE = 7 * DAY
+REFRESH_REPLAY_WINDOW = 300  # Leave half of Atlassian's ten-minute reuse window for transit/clock skew.
 REVISION_SPAN = 1_000_000_000
 MAX_SAFE_REVISION = 2**53 - 1
 ACCOUNT = re.compile(r"[A-Za-z0-9:-]{1,128}\Z")
@@ -149,9 +151,11 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def post_report(payload, token):
-    request = Request(ENDPOINT, data=json.dumps(payload).encode(), method="POST",
-                      headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"})
+def post_json(endpoint, payload, token=None):
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    request = Request(endpoint, data=json.dumps(payload).encode(), method="POST", headers=headers)
     opener = build_opener(ProxyHandler({}), NoRedirect())
     try:
         response = opener.open(request, timeout=15)
@@ -159,8 +163,16 @@ def post_report(payload, token):
         response = error
     with response:
         raw = response.read(65537)
-        require(len(raw) <= 65536, "Reporting response exceeds the limit; delivery is uncertain.")
+        require(len(raw) <= 65536, "Provider response exceeds the limit; delivery is uncertain.")
         return response.status, response.headers, raw
+
+
+def post_report(payload, token):
+    return post_json(ENDPOINT, payload, token)
+
+
+def valid_token(value, limit=8192):
+    return isinstance(value, str) and 0 < len(value) <= limit and all(33 <= ord(c) <= 126 for c in value)
 
 
 def seconds_header(headers, name, default, multiplier=1):
@@ -192,9 +204,80 @@ def reporting_lock(path):
         yield
 
 
+def reporting_token(path, now, send=None, clock=None, rotating_only=False):
+    """Read a static token or atomically rotate a dedicated operator credential."""
+    path = Path(path)
+    initial = private_read(path, 65536)
+    if isinstance(initial, dict) and set(initial) == {"access_token"}:
+        require(not rotating_only, "A static token cannot renew; provision a dedicated rotating credential.")
+        require(valid_token(initial["access_token"]), "Invalid private reporting credential.")
+        return initial["access_token"]
+    parent = private_parent(path)
+    require(parent.stat().st_uid == os.geteuid() and path.lstat().st_uid == os.geteuid(),
+            "The rotating credential and directory must belong to the operator.")
+    require(not any((directory / ".git").exists() for directory in path.resolve().parents),
+            "Keep the rotating credential outside repositories, including ignored directories.")
+    send = send or (lambda payload: post_json(TOKEN_ENDPOINT, payload))
+    clock = clock or (lambda: now)
+    with reporting_lock(path):
+        credential = private_read(path, 65536)
+        require(isinstance(credential, dict)
+                and set(credential) == {"version", "client_id", "client_secret", "access_token", "refresh_token",
+                                       "expires_at", "refresh_started_at", "retry_after", "reauthorize"}
+                and type(credential["version"]) is int and credential["version"] == 1
+                and valid_token(credential["client_id"], 1024) and valid_token(credential["client_secret"])
+                and valid_token(credential["access_token"]) and valid_token(credential["refresh_token"])
+                and type(credential["expires_at"]) is int and 0 < credential["expires_at"] <= now + 7 * DAY
+                and (credential["refresh_started_at"] is None
+                     or type(credential["refresh_started_at"]) is int and 0 < credential["refresh_started_at"] <= now)
+                and type(credential["retry_after"]) is int and credential["retry_after"] >= 0
+                and type(credential["reauthorize"]) is bool,
+                "Invalid rotating credential; preserve the file and investigate.")
+        require(not credential["reauthorize"], "The operator credential requires a new OAuth authorization.")
+        require(credential["retry_after"] <= now, "The token endpoint retry delay is still active.")
+        previous_start = credential["refresh_started_at"]
+        if previous_start is None and credential["expires_at"] > now + 60:
+            return credential["access_token"]
+        require(previous_start is None or now - previous_start < REFRESH_REPLAY_WINDOW,
+                "Renewal delivery stayed uncertain beyond the safe replay window; obtain a new OAuth authorization.")
+        if previous_start is None:
+            credential["refresh_started_at"] = now
+            write_state(path, credential)
+        try:
+            status, headers, raw = send({"grant_type": "refresh_token", "client_id": credential["client_id"],
+                                         "client_secret": credential["client_secret"], "refresh_token": credential["refresh_token"]})
+        except Exception:
+            raise RuntimeError("Renewal delivery is uncertain; preserve the pending attempt and its replay deadline.") from None
+        received = max(now, int(clock()))
+        if status in (400, 401, 403, 429):
+            credential["refresh_started_at"] = previous_start
+            if status == 429:
+                credential["retry_after"] = received + seconds_header(headers, "Retry-After", 300)
+            else:
+                credential["reauthorize"] = True
+            write_state(path, credential)
+            raise RuntimeError("Renewal was rejected; honor the retry delay or obtain a new OAuth authorization.")
+        require(status == 200, "Renewal acknowledgement is uncertain; the pending attempt was preserved.")
+        try:
+            response = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError("Malformed renewal response; the pending attempt was preserved.") from None
+        require(isinstance(response, dict) and valid_token(response.get("access_token"))
+                and valid_token(response.get("refresh_token"))
+                and type(response.get("expires_in")) is int and 0 < response["expires_in"] <= 7 * DAY
+                and ("token_type" not in response or isinstance(response["token_type"], str)
+                     and response["token_type"].lower() == "bearer"),
+                "Invalid renewal acknowledgement; the pending attempt was preserved.")
+        credential.update(access_token=response["access_token"], refresh_token=response["refresh_token"],
+                          expires_at=now + response["expires_in"], refresh_started_at=None, retry_after=0)
+        write_state(path, credential)
+        require(credential["expires_at"] > received,
+                "The new access token expired during renewal; its rotated refresh token was saved.")
+        return credential["access_token"]
+
+
 def report(accounts, path, token, now, send=post_report, clock=None):
-    require(isinstance(token, str) and 0 < len(token) <= 8192
-            and all(33 <= ord(c) <= 126 for c in token), "Invalid private reporting credential.")
+    require(valid_token(token), "Invalid private reporting credential.")
     clock = clock or (lambda: now)
     with reporting_lock(path):
         state = state_file(path, now)
@@ -327,14 +410,23 @@ def stage_erasures(database, path, journal_path, now, create=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("inventory", "report", "stage-erasure"))
-    parser.add_argument("--database", action="append", required=True, type=Path)
+    parser.add_argument("command", choices=("inventory", "report", "stage-erasure", "renew-credential"))
+    parser.add_argument("--database", action="append", type=Path)
     parser.add_argument("--state", type=Path)
-    parser.add_argument("--credential", type=Path, help="Private JSON containing only access_token; never pass the token as an argument.")
+    parser.add_argument("--credential", type=Path, help="Private static or rotating credential JSON; never pass tokens as arguments.")
     parser.add_argument("--journal", type=Path)
     parser.add_argument("--create-journal", action="store_true", help="One-time creation before reporting; never use to recover a missing journal.")
     args = parser.parse_args()
     now = int(time.time())
+    if args.command == "renew-credential":
+        require(args.credential is not None and not args.database and args.state is None
+                and args.journal is None and not args.create_journal,
+                "Credential renewal only accepts --credential; it does not open document databases.")
+        reporting_token(args.credential, now, clock=time.time, rotating_only=True)
+        print(json.dumps({"credential_ready": True}))
+        return
+    if not args.database:
+        parser.error("--database is required for inventory, report and stage-erasure")
     if args.command == "stage-erasure":
         require(len(args.database) == 1 and args.state is not None and args.journal is not None,
                 "Staging requires the current stopped database, reporting state and external journal.")
@@ -345,9 +437,8 @@ def main():
     if args.command == "report":
         require(summary["unclassified"] == 0, "Unclassified documents remain; no report was sent.")
         require(args.state is not None and args.credential is not None, "Reporting requires private state and credential paths.")
-        credential = private_read(args.credential, 16384)
-        require(isinstance(credential, dict) and set(credential) == {"access_token"}, "Invalid private reporting credential.")
-        summary.update(report(accounts, args.state, credential["access_token"], now, clock=time.time))
+        token = reporting_token(args.credential, now, clock=time.time)
+        summary.update(report(accounts, args.state, token, int(time.time()), clock=time.time))
     print(json.dumps(summary, sort_keys=True))
 
 

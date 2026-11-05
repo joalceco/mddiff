@@ -38,21 +38,55 @@ La migración 5→6 añade `privacy_guard`, una tabla de metadatos de operación
 
 `scripts/jira_privacy_report.py` procesa checkpoints privados con el escritor detenido. `inventory` muestra únicamente cantidades; agrega la fecha más antigua de cada cuenta entre todos los originales, propuestas y checkpoints proporcionados. Deben incluirse la copia vigente y todas las copias retenidas. El comando no descubre snapshots restic ni demuestra que el operador haya incluido todos.
 
-`report` envía únicamente identificadores y fechas a `https://api.atlassian.com/app/report-accounts/`. Rechaza inventarios pendientes de clasificación. Obtiene el token de un JSON privado con la clave `access_token`, sin argumentos de credenciales ni salida de identificadores. No utiliza proxies del entorno ni sigue redirecciones. El estado y su lock requieren una carpeta privada; las escrituras son atómicas, con permisos `0600` y sincronización a disco.
+`report` envía únicamente identificadores y fechas a `https://api.atlassian.com/app/report-accounts/`. Rechaza inventarios pendientes de clasificación. Obtiene el token de un JSON privado: conserva compatibilidad con el formato estático `{"access_token":"…"}` y admite la credencial renovable descrita a continuación. No acepta tokens como argumentos ni imprime identificadores. No utiliza proxies del entorno ni sigue redirecciones. El estado y su lock requieren una carpeta privada; las escrituras son atómicas, con permisos `0600` y sincronización a disco.
 
 El reporte divide las cuentas vencidas en lotes de hasta 90. Guarda el avance por cuenta y conserva el ciclo al reiniciar. La [aclaración de Atlassian sobre `Cycle-Period`](https://community.developer.atlassian.com/t/cycle-period-header-example/26940/2) especifica días; el código mantiene el valor predeterminado vigente de siete días y usa segundos para `Retry-After`. Un `429` impide nuevos lotes hasta el plazo indicado. Un rechazo de credenciales permite reintentar solo los lotes que no habían sido aceptados.
 
 Antes de enviar un lote, el estado registra que hay una respuesta pendiente. Una interrupción de transporte o una respuesta ambigua conserva esa marca y detiene nuevos envíos hasta reconciliar el resultado. No se pretende conseguir una entrega exactamente una vez mediante un endpoint sin clave de idempotencia. Un resultado `closed` o `updated` queda guardado como acción pendiente y detiene los lotes restantes. **Guardar la acción no elimina el contenido ni acredita su cumplimiento.**
 
-La herramienta todavía no renueva el token ni tiene timer instalado. La publicación de decisiones y el binario permiten aplicar acciones a checkpoints detenidos, como se describe a continuación. Aún falta integrar el ciclo completo con los respaldos del cluster. Tampoco hay una orden automática para dar por resuelta una respuesta incierta; no basta con ejecutar un POST ni con obtener `204`.
+La rama renueva credenciales de operador, pero todavía no tiene una credencial real provisionada ni un timer de reporting instalado. La publicación de decisiones y el binario permiten aplicar acciones a checkpoints detenidos, como se describe a continuación. Aún falta activar el ciclo completo con los respaldos del cluster. Tampoco hay una orden automática para dar por resuelta una respuesta incierta del **reporte de cuentas**; no basta con ejecutar un POST ni con obtener `204`.
 
 Para comprobar el protocolo sin credenciales ni servicios reales:
 
 ```sh
 python3 scripts/test_jira_privacy_report.py
+python3 scripts/test_jira_report_credential.py
 ```
 
 La suite usa únicamente HTTP en loopback, bases temporales y tokens sintéticos. Las excepciones y respuestas del proveedor no imprimen documentos ni credenciales.
+
+### Credencial renovable del operador
+
+El formato versionado reúne `client_id`, `client_secret`, `access_token`, `refresh_token`, `expires_at` y el estado de la renovación. Se provisiona desde una autorización OAuth de la misma app con `offline_access`; no sirve un token de API de Jira ni un grant de otra app. Este es el esquema, con valores de sustitución:
+
+```json
+{
+  "version": 1,
+  "client_id": "REPLACE_WITH_APP_CLIENT_ID",
+  "client_secret": "REPLACE_WITH_APP_CLIENT_SECRET",
+  "access_token": "REPLACE_WITH_ACCESS_TOKEN",
+  "refresh_token": "REPLACE_WITH_REFRESH_TOKEN",
+  "expires_at": 1,
+  "refresh_started_at": null,
+  "retry_after": 0,
+  "reauthorize": false
+}
+```
+
+`expires_at` es la fecha de vencimiento del access token, en segundos Unix; el `1` del esquema representa un token vencido. El archivo requiere `0600` y su directorio `0700`, ambos propiedad del operador que ejecuta la herramienta. Debe quedar fuera de repositorios —incluidos directorios ignorados—, del montaje de la aplicación y de la restauración de documentos. No copies una credencial rotatoria que otro proceso o una conexión del visor siga renovando: el bloqueo protege un archivo, no dos copias del mismo grant. Si se pierde, obtén una autorización nueva; recuperar un refresh token antiguo desde un checkpoint puede reutilizar uno invalidado.
+
+Para verificar o renovar la credencial sin abrir bases de documentos:
+
+```sh
+python3 scripts/jira_privacy_report.py renew-credential \
+  --credential /srv/operator-private/jira.json
+```
+
+El comando devuelve solo `{"credential_ready":true}`. Reutiliza un access token con más de 60 segundos de vigencia o lo renueva contra `https://auth.atlassian.com/oauth/token`. `report` hace la misma comprobación antes de enviar cuentas. La renovación no solicita scopes adicionales.
+
+La [documentación OAuth de Atlassian](https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/#use-a-refresh-token-to-get-another-access-token-and-refresh-token-pair) describe la rotación y un margen de reutilización de diez minutos para fallos de red o concurrencia. Antes de solicitar la renovación, la herramienta sincroniza a disco la hora del intento. Si la respuesta se pierde o es ambigua, conserva ese intento y permite recuperarlo durante **cinco minutos desde la primera solicitud**, dejando margen para tránsito y desfase de reloj. Los reintentos no amplían el plazo. Fuera de esa ventana exige una autorización nueva; no reinicies el marcador para reutilizar el token.
+
+Una respuesta válida reemplaza y sincroniza ambos tokens antes de permitir el reporte. Si el access token ya venció durante el tránsito, conserva el refresh token nuevo para la siguiente renovación. `429` conserva `Retry-After` en segundos; `400`, `401` y `403` dejan la credencial bloqueada hasta obtener una nueva autorización. No se guardan cuerpos de error del proveedor. La recuperación de una renovación OAuth y la reconciliación de una respuesta incierta del reporte de cuentas son operaciones distintas.
 
 ## Barrera externa y borrado
 
@@ -96,7 +130,7 @@ Los checkpoints de esquema 3–5 se migran con la imagen compatible de esquema 6
 
 El operador debe verificar el archivo de respaldo, la imagen y la compatibilidad de la identidad y la clave de conexiones **antes** de llamar al preparador. Los helpers privados conservan la configuración OAuth vigente y el código actual de recuperación, para que un respaldo antiguo no los reemplace. El registro permanece fuera de los directorios restaurados. En un host nuevo se requiere instalar primero una versión compatible y recuperar el registro autorizado por separado; la herramienta no inventa decisiones perdidas.
 
-**Los helpers instalados en el cluster aún no aplican esta política.** La preparación y las pruebas locales no acreditan su despliegue ni la recuperación completa de restic, IdP, secretos y configuración. La barrera tampoco sustituye el bloqueo de mantenimiento ni el bloqueo del operador que coordina respaldos y restauraciones.
+El 2026-11-04 se instalaron los helpers de operación después de tres recuperaciones completas en frío en un clon aislado. Se verificaron IdP, claves de firma, conexiones cifradas con proveedor sintético, trabajo/procedencia y conservación de decisiones y código vigentes. Se corrigió la espera de PostgreSQL para evitar su servidor temporal de inicialización. El clon se retiró y pasó el respaldo completo con siete copias y sin bloqueos de repositorio. Estos ensayos usaron loopback; **la beta sigue en SQLite 4, con la barrera y el reporting periódico sin activar**. La barrera tampoco sustituye el bloqueo de mantenimiento ni el bloqueo del operador que coordina respaldos y restauraciones.
 
 Los snapshots cifrados anteriores no se reescriben ni se eliminan por publicar el registro. El borrado de un checkpoint de prueba tampoco acredita que se hayan tratado todas las copias retenidas. Por eso `stage-erasure` y el binario **no vacían las acciones pendientes** del reporter: falta verificar el conjunto de copias y los controles de restauración antes de confirmar cumplimiento.
 
