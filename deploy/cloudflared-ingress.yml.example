@@ -1,0 +1,8 @@
+# Add the hostname to the existing tunnel, before its final fallback rule.
+# The tunnel container must share the intended private Docker network with mddiff.
+ingress:
+  - hostname: review.example
+    service: http://mddiff:3847
+    originRequest:
+      httpHostHeader: review.example
+  - service: http_status:404

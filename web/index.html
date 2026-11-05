@@ -14,6 +14,9 @@
     <span class="header-caption">Una segunda mirada a tus documentos.</span>
     <div class="header-actions">
       <span id="connection" class="connection" role="status">Conectando…</span>
+      <span id="auth-user" class="session-user" hidden></span>
+      <button id="logout-button" type="button" hidden>Cerrar sesión</button>
+      <button id="login-button" type="button" hidden>Iniciar sesión</button>
       <button id="reload-button" type="button" title="Volver a leer los archivos desde disco" disabled>↻ Recargar</button>
       <button id="theme-toggle" type="button">Modo claro</button>
     </div>
@@ -33,10 +36,13 @@
       <div id="error" class="error" role="alert" hidden></div>
       <div id="review-bar" class="review-bar" hidden>
         <div id="review-summary" role="status"></div>
-        <div id="change-navigation" class="change-navigation" hidden>
-          <span id="change-position">0 / 0</span>
-          <button id="previous-change" class="icon-button" title="Cambio anterior (K)" aria-label="Cambio anterior">↑</button>
-          <button id="next-change" class="icon-button" title="Cambio siguiente (J)" aria-label="Cambio siguiente">↓</button>
+        <div class="review-actions">
+          <button id="delete-work" type="button" hidden>Borrar trabajo</button>
+          <div id="change-navigation" class="change-navigation" hidden>
+            <span id="change-position">0 / 0</span>
+            <button id="previous-change" class="icon-button" title="Cambio anterior (K)" aria-label="Cambio anterior">↑</button>
+            <button id="next-change" class="icon-button" title="Cambio siguiente (J)" aria-label="Cambio siguiente">↓</button>
+          </div>
         </div>
       </div>
       <div id="pane-headers" class="pane-headers">
@@ -44,11 +50,35 @@
           <label for="base-path" class="pane-label">ORIGINAL</label>
           <strong id="base-name">Sin archivo</strong>
           <input id="base-path" class="pane-path" name="base_path" placeholder="Ruta del original.md" title="Ruta relativa a la carpeta autorizada o absoluta dentro de ella" required autocomplete="off" spellcheck="false">
+          <div id="base-source-actions" class="source-actions" role="group" aria-label="Elegir origen del original" hidden>
+            <button id="base-paste" type="button" aria-label="Pegar texto del original" aria-controls="base-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="base-upload" type="button" aria-label="Subir Markdown original" disabled>Subir .md</button>
+          </div>
+          <div id="base-provenance" class="source-provenance" hidden></div>
+          <input id="base-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown original" hidden disabled>
+          <textarea id="base-text" class="paste-text" rows="4" aria-label="Markdown del original" aria-describedby="base-import-status" placeholder="Pega aquí el Markdown del original…" spellcheck="false" hidden></textarea>
+          <span id="base-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
         <div id="candidate-header">
           <label for="candidate-path" class="pane-label">PROPUESTA</label>
           <strong id="candidate-name">Sin archivo</strong>
           <input id="candidate-path" class="pane-path" name="candidate_path" placeholder="Ruta de la propuesta.md" title="La comparación se abre automáticamente al indicar ambos archivos" autocomplete="off" spellcheck="false">
+          <div id="candidate-source-actions" class="source-actions" role="group" aria-label="Elegir origen de la propuesta" hidden>
+            <button id="candidate-paste" type="button" aria-label="Pegar texto de la propuesta" aria-controls="candidate-text" aria-expanded="false" disabled>Pegar texto</button>
+            <button id="candidate-upload" type="button" aria-label="Subir Markdown propuesto" disabled>Subir .md</button>
+            <button id="candidate-agent" type="button" aria-expanded="false" aria-controls="candidate-agent-help" disabled>Recibir del agente</button>
+          </div>
+          <div id="candidate-provenance" class="source-provenance" hidden></div>
+          <div id="candidate-agent-help" class="agent-help" hidden>
+            <strong>Recibe ambos documentos en este espacio</strong>
+            <p>Conecta tu agente al MCP de este visor e inicia sesión con tu misma cuenta.</p>
+            <code id="candidate-agent-url"></code>
+            <p>Pídele que obtenga la revisión con get_current_work y envíe los dos Markdown, previo y actual, con submit_comparison. La comparación se actualizará automáticamente.</p>
+            <a href="https://github.com/joalceco/mddiff/blob/feature/multiuser-sources/docs/planning/remote-agents.md#configurar-codex" target="_blank" rel="noopener noreferrer">Ver configuración de Codex</a>
+          </div>
+          <input id="candidate-file" type="file" accept=".md,.markdown" aria-label="Archivo Markdown propuesto" hidden disabled>
+          <textarea id="candidate-text" class="paste-text" rows="4" aria-label="Markdown de la propuesta" aria-describedby="candidate-import-status" placeholder="Pega aquí el Markdown de la propuesta…" spellcheck="false" hidden></textarea>
+          <span id="candidate-import-status" class="import-status" role="status" hidden>Markdown UTF-8 · máx. 2 MiB</span>
         </div>
       </div>
       <section id="empty" class="empty-state">
