@@ -83,8 +83,49 @@ class Reporting(unittest.TestCase):
         self.assertEqual(privacy.inventory([legacy], NOW)[1]["unclassified"], 1)
         with closing(sqlite3.connect(legacy)) as db, db:
             db.execute("PRAGMA user_version=4")
-        with self.assertRaises(RuntimeError):
-            privacy.inventory([legacy], NOW)
+        self.assertEqual(privacy.inventory([legacy], NOW)[1]["unclassified"], 1)
+
+    def test_older_checkpoints_count_empty_work_and_block_unclassified_documents(self):
+        live = self.database("current.db", {"synthetic:alice": NOW - 10})
+        for version in (3, 4):
+            with self.subTest(version=version):
+                path = self.root / f"schema-{version}.db"
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.executescript("CREATE TABLE current_work(base_label TEXT,candidate_label TEXT);"
+                                     "INSERT INTO current_work VALUES(NULL,NULL);"
+                                     f"PRAGMA user_version={version};")
+                path.chmod(0o600)
+                before = path.read_bytes()
+                accounts, summary = privacy.inventory([live, path], NOW)
+                self.assertEqual(accounts, {"synthetic:alice": NOW - 10})
+                self.assertEqual(summary, {"checkpoints": 2, "documents": 1, "accounts": 1, "unclassified": 0})
+                self.assertEqual(path.read_bytes(), before)
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute("INSERT INTO current_work VALUES('original','proposal')")
+                before = path.read_bytes()
+                self.assertEqual(privacy.inventory([live, path], NOW)[1]["unclassified"], 2)
+                with patch("sys.argv", ["jira_privacy_report", "report", "--database", str(live),
+                                        "--database", str(path), "--state", str(self.state)]), \
+                        patch.object(privacy, "reporting_token") as credential, patch.object(privacy, "post_json") as send:
+                    with self.assertRaisesRegex(RuntimeError, "Unclassified"):
+                        privacy.main()
+                    credential.assert_not_called()
+                    send.assert_not_called()
+                self.assertFalse(self.state.exists())
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_unsupported_or_corrupt_inventory_never_looks_empty(self):
+        for version in (2, 7):
+            path = self.database(f"unsupported-{version}.db", {})
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute(f"PRAGMA user_version={version}")
+            with self.subTest(version=version), self.assertRaises(RuntimeError):
+                privacy.inventory([path], NOW)
+        path = self.root / "corrupt.db"
+        path.write_bytes(b"not a SQLite database")
+        path.chmod(0o600)
+        with self.assertRaises(sqlite3.DatabaseError):
+            privacy.inventory([path], NOW)
 
     def test_private_inputs_and_invalid_times_fail_without_network(self):
         for key, at in [("unknown", NOW - 1), ("bad id", NOW - 1), ("synthetic:alice", NOW + 1), ("synthetic:alice", True)]:

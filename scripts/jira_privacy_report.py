@@ -95,9 +95,11 @@ def inventory(databases, now):
         require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0,
                 "Inventory requires private regular SQLite checkpoints.")
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            require(db.execute("PRAGMA user_version").fetchone()[0] in (5, 6),
-                    "Inventory requires schema 5 or 6; older checkpoints need classification.")
-            for base, candidate, raw in db.execute("SELECT base_label IS NOT NULL,candidate_label IS NOT NULL,jira_privacy FROM current_work"):
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            require(version in (3, 4, 5, 6), "Inventory requires a supported schema (3–6).")
+            require(db.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "Invalid inventory checkpoint.")
+            ledger = "jira_privacy" if version >= 5 else "NULL"
+            for base, candidate, raw in db.execute("SELECT base_label IS NOT NULL,candidate_label IS NOT NULL," + ledger + " FROM current_work"):
                 if not (base or candidate):
                     continue
                 value = json.loads(raw) if raw is not None else None
