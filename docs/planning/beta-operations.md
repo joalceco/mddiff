@@ -103,3 +103,13 @@ La lectura real de [Jira #10](https://github.com/joalceco/mddiff/issues/10), la 
 ### Activación Jira del 2026-11-04
 
 Se configuró el secreto OAuth mediante el montaje privado existente y se recreó solo el visor, conservando el binario y esquema vigentes. Pasaron conexión personal y captura Jira reales, comparación mediante Codex/MCP, conservación del original/procedencia, aislamiento y rechazo de revisión antigua. Se borraron los documentos de prueba, se desconectó su token y se retiraron las cuentas desechables antes del respaldo. El trabajo del propietario y los contenedores del IdP/PostgreSQL se conservaron. La app Jira sigue privada y la distribución requiere #17.
+
+### SQLite 6 y barrera activa del 2026-11-05
+
+Con autorización explícita, se activó `0e1c4a3` y se migró SQLite 4→6 bajo mantenimiento. La autoridad externa queda montada de solo lectura y el checkpoint usa el protocolo 1. Se conservaron trabajo, conexiones cifradas, secretos y contenedores de identidad; no había documentos en la base migrada. Se corrigió el permiso legado del manifiesto a `0600` antes de terminar su publicación, sin repetir la migración.
+
+El primer ciclo manual verificó ocho checkpoints mediante recuperación protegida: estado actual y siete respaldos. No encontró documentos, cuentas, pendientes ni elementos sin clasificar. Se retiraron los temporales y se reabrió el lector. VictoriaMetrics recibió las seis métricas agregadas esperadas. El respaldo posterior pasó integridad y retención; una de las siete copias contiene esquema 6 y las otras seis conservan esquema 4.
+
+Sobre la imagen publicada, dos identidades nuevas completaron login y Codex OAuth/MCP por HTTPS, lectura del trabajo, propuestas privadas, SSE y rechazo de revisión obsoleta; una tercera sin invitación recibió rechazo. Pasaron también las sondas de salud, autenticación y administración. No se usaron turnos de modelo. Se borró el trabajo sintético mediante la API y se retiraron únicamente esas tres identidades.
+
+El timer de privacidad sigue sin instalar: habilitar futuras eliminaciones sin confirmación por caso requiere autorización separada. La recuperación protegida de checkpoints no sustituye la restauración completa en frío del respaldo nuevo, todavía pendiente. Sharing continúa deshabilitado. Consulta [el alcance actual y los pendientes](jira-privacy.md#activación-productiva-del-2026-11-05).

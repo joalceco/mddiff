@@ -2,7 +2,7 @@
 
 Issue: [#10](https://github.com/joalceco/mddiff/issues/10). La captura usa la conexión personal Jira Cloud existente, no una credencial compartida entre usuarios.
 
-Estado al **2026-11-04**: se verificaron OAuth, lectura real de una descripción Jira y comparación con una propuesta enviada mediante Codex/MCP sobre el binario publicado `6bfccea` y SQLite 4. La app sigue privada; [#17](https://github.com/joalceco/mddiff/issues/17) bloquea la distribución a otras cuentas Atlassian.
+Estado al **2026-11-05**: la beta usa `0e1c4a3`/SQLite 6 con barrera externa activa y un primer ciclo manual verificado sobre el estado vigente y siete respaldos. Se verificaron OAuth, lectura real de una descripción Jira y comparación mediante Codex/MCP con la cuenta propietaria; el nuevo permiso de usuarios pasó además una prueba local aislada. La app sigue privada y el timer de privacidad pendiente; [#17](https://github.com/joalceco/mddiff/issues/17) bloquea la distribución a otras cuentas Atlassian.
 
 ## Resultado y alcance
 
@@ -131,7 +131,7 @@ El 2026-11-05, con autorización del propietario, se configuró `read:jira-user`
 
 El documento elegido no contenía cuentas estructuradas, por lo que esa captura no ejercitó la clasificación de menciones sin tipo. Para validar el contrato real del endpoint, el operador consultó la propia cuenta que dio el consentimiento y obtuvo `200`, una página de una cuenta y `accountType: atlassian`. Los perfiles se descartaron sin incorporarlos al Markdown ni al inventario del documento. Los casos ambiguos, la paginación y los fallos del conector conservan sus pruebas sintéticas; no se atribuyen al documento real.
 
-Se retiraron el callback temporal, las copias locales de documentos y claves, la copia local del grant temporal y la identidad sintética. El contenedor de Keycloak volvió a su estado inicial detenido. La credencial anterior y exclusiva del operador renovó después del nuevo consentimiento y mantuvo acceso al sitio, sin reemplazarla ni enviar un reporte de producción. La beta conserva `6bfccea`/SQLite 4; Sharing sigue deshabilitado.
+Se retiraron el callback temporal, las copias locales de documentos y claves, la copia local del grant temporal y la identidad sintética. El contenedor de Keycloak volvió a su estado inicial detenido. La credencial anterior y exclusiva del operador renovó después del nuevo consentimiento y mantuvo acceso al sitio, sin reemplazarla ni enviar un reporte de producción durante esa prueba. Después se activó `0e1c4a3`/SQLite 6 y pasó el primer [ciclo manual productivo](jira-privacy.md#activación-productiva-del-2026-11-05). Sharing sigue deshabilitado.
 
 El [CI completo de `0e1c4a3`](https://github.com/joalceco/mddiff/actions/runs/42101018303) aprobó código y contenedor, incluidas las regresiones de navegador y capacidad de diez usuarios. La imagen candidata del mismo commit pasó además las pruebas de privacidad y 21 casos del coordinador en Linux, con un ciclo de captura, borrado y recuperación sintéticos. La política `findmnt` y Nginx se simularon en ese último ensayo; no acredita la activación del ciclo en el servicio publicado.
 

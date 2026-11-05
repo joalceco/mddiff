@@ -4,7 +4,7 @@ Fecha: 2026-10-27. Issue: [#8](https://github.com/joalceco/mddiff/issues/8). Ram
 
 Este documento registra S07. La entrega posterior [S08: captura de Memos](memos-source.md) permite abrir una nota como original con estas conexiones y añade el esquema SQLite 3 para su procedencia.
 
-Estado al **2026-11-04**: la beta mantiene Keycloak por invitación, el binario `6bfccea` y SQLite 4. S09–S11 tienen implementación y verificación; la conexión Jira real con la cuenta propietaria y su comparación por Codex/MCP pasaron. La distribución a otras cuentas Atlassian continúa bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17). Google/GitHub y Memos personal real siguen pendientes.
+Estado al **2026-11-05**: la beta mantiene Keycloak por invitación y usa `0e1c4a3`/SQLite 6 con barrera externa activa. Pasaron un ciclo manual con el estado vigente y siete respaldos, las métricas recibidas y el respaldo nuevo; el timer de privacidad sigue pendiente. S09–S11 tienen implementación y verificación; la conexión Jira real con la cuenta propietaria y su comparación por Codex/MCP pasaron. La distribución a otras cuentas Atlassian continúa bloqueada por [#17](https://github.com/joalceco/mddiff/issues/17). Google/GitHub y Memos personal real siguen pendientes.
 
 ## Resultado y alcance
 
@@ -92,7 +92,7 @@ Al capturar una descripción con referencias de cuenta sin tipo, la rama consult
 
 Verificado el 2026-11-05: el propietario autorizó `read:jira-user`, se añadió en la consola y se repitió el consentimiento real, restringido al sitio seleccionado. Un visor local aislado con el binario `0e1c4a3` y la barrera activa capturó una descripción real y conservó el original al recibir una propuesta por MCP. El endpoint de usuarios devolvió una cuenta de tipo `atlassian` para la propia persona que consintió. El documento elegido no contenía cuentas estructuradas; los casos de menciones sin tipo siguen cubiertos por fixtures sintéticas. Consulta [el alcance de esta prueba](jira-source.md#validación-real-del-permiso-de-usuarios).
 
-Se retiraron el callback local temporal, las copias de documentos, claves y grant de la prueba, y su identidad sintética. La credencial previa y exclusiva del operador renovó después sin reemplazarla. La beta publicada sigue con `6bfccea` y sus scopes solicitados anteriores; la imagen nueva aún no se promovió. El nuevo consentimiento no habilita Sharing.
+Se retiraron el callback local temporal, las copias de documentos, claves y grant de la prueba, y su identidad sintética. La credencial previa y exclusiva del operador renovó después sin reemplazarla. Después se promovió `0e1c4a3` con ambos scopes de lectura y pasó el primer [ciclo manual productivo](jira-privacy.md#activación-productiva-del-2026-11-05). El nuevo consentimiento y esa activación no habilitan Sharing.
 
 Los refresh tokens rotativos se cifran y guardan antes de continuar con otras solicitudes. La renovación se serializa por usuario y destino; desconectar puede invalidar una comprobación en curso. Cortar la conexión HTTP del cliente no cancela una renovación ya iniciada.
 

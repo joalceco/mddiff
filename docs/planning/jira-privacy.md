@@ -2,7 +2,7 @@
 
 Fecha: 2026-11-05. Issue: [#17](https://github.com/joalceco/mddiff/issues/17).
 
-La rama usa SQLite 6 y dispone de inventario privado, reporte 3LO, publicación de decisiones y aplicación de borrados con una barrera externa. Hay pruebas locales del binario real y de recuperación de un checkpoint anterior. **Este flujo todavía no está desplegado ni integrado con los respaldos y la operación periódica del cluster.** No se habilita Sharing ni se acepta su declaración. La beta publicada conserva el binario `6bfccea` y SQLite 4.
+La rama y la beta publicada usan `0e1c4a3`/SQLite 6, con inventario privado y barrera externa de privacidad activa. Un ciclo manual verificó el estado vigente y las siete copias retenidas mediante recuperación protegida; las métricas llegaron al monitoreo y el respaldo posterior contiene SQLite 6. **El timer de privacidad todavía no está habilitado.** No se habilita Sharing ni se acepta su declaración. Los ensayos de borrado usan datos sintéticos; el ciclo productivo no encontró documentos ni cuentas que reportar.
 
 ## Evidencia pública y alcance
 
@@ -20,7 +20,19 @@ La documentación de Atlassian no determina específicamente cómo debe aplicar 
 
 La captura resuelve los identificadores válidos sin tipo mediante una [consulta acotada a Jira](jira-source.md#clasificación-de-referencias-de-cuenta), con la credencial personal. Usa solo el tipo de cuenta devuelto, sin enriquecer el ADF ni guardar perfiles. Las cuentas app y las colecciones declaradas quedan fuera del inventario de personas. Los tipos explícitos desconocidos y las cuentas que no se pueden resolver siguen sin clasificar; una captura nueva se rechaza conservando el trabajo anterior.
 
-El 2026-11-05 se configuró y consintió `read:jira-user` con autorización del propietario. Pasaron una captura Jira real con la barrera activa en un lector local aislado y una consulta del endpoint de usuarios con la propia cuenta que consintió. El documento real no contenía cuentas estructuradas; la resolución de menciones ambiguas mantiene sus pruebas sintéticas. Se retiraron las copias y el callback temporales, y la credencial previa del operador renovó después sin reemplazarla. [Evidencia y límites](jira-source.md#validación-real-del-permiso-de-usuarios). El servicio publicado sigue en SQLite 4; estos resultados no activan el ciclo de privacidad ni Sharing.
+El 2026-11-05 se configuró y consintió `read:jira-user` con autorización del propietario. Pasaron una captura Jira real con la barrera activa en un lector local aislado y una consulta del endpoint de usuarios con la propia cuenta que consintió. El documento real no contenía cuentas estructuradas; la resolución de menciones ambiguas mantiene sus pruebas sintéticas. Se retiraron las copias y el callback temporales, y la credencial previa del operador renovó después sin reemplazarla. [Evidencia y límites](jira-source.md#validación-real-del-permiso-de-usuarios). Después se activó SQLite 6 y se ejecutó el ciclo manual descrito a continuación; Sharing continúa deshabilitado.
+
+### Activación productiva del 2026-11-05
+
+Con autorización explícita del propietario, se migró SQLite 4→6 bajo mantenimiento y se montó la autoridad canónica externa de solo lectura. Se conservaron los campos de trabajo, las conexiones cifradas, los secretos y los contenedores de identidad. La publicación detectó un permiso legado incompatible en el manifiesto; se corrigió a `0600` y se completó la fase pendiente sin repetir la migración ni recrear la autoridad.
+
+El primer ciclo real verificó ocho checkpoints: estado actual y siete respaldos retenidos. No había documentos, cuentas, acciones pendientes ni elementos sin clasificar. No se envió un POST vacío para simular reporting ni se borraron documentos reales. Se retiraron las copias temporales, se liberó el mantenimiento y las sondas públicas volvieron a sus respuestas esperadas. El monitoreo recibió éxito, antigüedad, pendientes, incertidumbre, validez y generación como métricas agregadas, sin etiquetas de personas o documentos.
+
+El respaldo posterior pasó integridad y retención: siete copias, una de esquema 6 y seis anteriores de esquema 4. Esto acredita el respaldo nuevo y la preparación protegida de las copias del primer ciclo; **todavía no acredita una restauración completa en frío del nuevo respaldo**. Las tres restauraciones completas anteriores siguen siendo evidencia del ensayo aislado histórico.
+
+Las unidades horarias están preparadas y pasan la validación nativa de systemd, pero no se instalaron. La revisión automática requiere autorización separada para futuras eliminaciones sin confirmación por caso. Hasta obtenerla, la operación sigue siendo manual. Permanecen pendientes la programación continua, la prueba en frío del respaldo nuevo, la información pública de privacidad y la distribución autorizada a otra cuenta Atlassian.
+
+La imagen publicada pasó además el recorrido HTTPS con dos identidades invitadas y una sin rol: login, Codex OAuth/MCP, propuestas, eventos privados y conflictos de revisión, con cero turnos de modelo. Se retiraron los documentos mediante la API y después las tres cuentas sintéticas. [Evidencia operativa](beta-operations.md#sqlite-6-y-barrera-activa-del-2026-11-05).
 
 La columna privada `current_work.jira_privacy` conserva inventarios separados para original y propuesta. No se expone en `/api/work`, `/api/state` ni MCP; una entrada de documento tampoco puede proporcionarla. Cada registro contiene el identificador y la fecha de lectura del proveedor, en segundos Unix. No utiliza la fecha de modificación del issue.
 
