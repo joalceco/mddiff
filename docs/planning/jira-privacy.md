@@ -1,6 +1,6 @@
 # Jira: inventario privado y distribución pendiente
 
-Fecha: 2026-11-04. Issue: [#17](https://github.com/joalceco/mddiff/issues/17).
+Fecha: 2026-11-05. Issue: [#17](https://github.com/joalceco/mddiff/issues/17).
 
 La rama usa SQLite 6 y dispone de inventario privado, reporte 3LO, publicación de decisiones y aplicación de borrados con una barrera externa. Hay pruebas locales del binario real y de recuperación de un checkpoint anterior. **Este flujo todavía no está desplegado ni integrado con los respaldos y la operación periódica del cluster.** No se habilita Sharing ni se acepta su declaración. La beta publicada conserva el binario `6bfccea` y SQLite 4.
 
@@ -44,7 +44,7 @@ El reporte divide las cuentas vencidas en lotes de hasta 90. Guarda el avance po
 
 Antes de enviar un lote, el estado registra que hay una respuesta pendiente. Una interrupción de transporte o una respuesta ambigua conserva esa marca y detiene nuevos envíos hasta reconciliar el resultado. No se pretende conseguir una entrega exactamente una vez mediante un endpoint sin clave de idempotencia. Un resultado `closed` o `updated` queda guardado como acción pendiente y detiene los lotes restantes. **Guardar la acción no elimina el contenido ni acredita su cumplimiento.**
 
-La rama renueva credenciales de operador, pero todavía no tiene una credencial real provisionada ni un timer de reporting instalado. La publicación de decisiones y el binario permiten aplicar acciones a checkpoints detenidos, como se describe a continuación. Aún falta activar el ciclo completo con los respaldos del cluster. Tampoco hay una orden automática para dar por resuelta una respuesta incierta del **reporte de cuentas**; no basta con ejecutar un POST ni con obtener `204`.
+El operador dispone de una credencial real renovable, probada contra Atlassian el 2026-11-05. Todavía no hay un timer de reporting instalado. La publicación de decisiones y el binario permiten aplicar acciones a checkpoints detenidos, como se describe a continuación. Aún falta activar el ciclo completo con los respaldos del cluster. Tampoco hay una orden automática para dar por resuelta una respuesta incierta del **reporte de cuentas**; no basta con ejecutar un POST ni con obtener `204`.
 
 Para comprobar el protocolo sin credenciales ni servicios reales:
 
@@ -87,6 +87,16 @@ El comando devuelve solo `{"credential_ready":true}`. Reutiliza un access token 
 La [documentación OAuth de Atlassian](https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/#use-a-refresh-token-to-get-another-access-token-and-refresh-token-pair) describe la rotación y un margen de reutilización de diez minutos para fallos de red o concurrencia. Antes de solicitar la renovación, la herramienta sincroniza a disco la hora del intento. Si la respuesta se pierde o es ambigua, conserva ese intento y permite recuperarlo durante **cinco minutos desde la primera solicitud**, dejando margen para tránsito y desfase de reloj. Los reintentos no amplían el plazo. Fuera de esa ventana exige una autorización nueva; no reinicies el marcador para reutilizar el token.
 
 Una respuesta válida reemplaza y sincroniza ambos tokens antes de permitir el reporte. Si el access token ya venció durante el tránsito, conserva el refresh token nuevo para la siguiente renovación. `429` conserva `Retry-After` en segundos; `400`, `401` y `403` dejan la credencial bloqueada hasta obtener una nueva autorización. No se guardan cuerpos de error del proveedor. La recuperación de una renovación OAuth y la reconciliación de una respuesta incierta del reporte de cuentas son operaciones distintas.
+
+### Validación real del protocolo
+
+El 2026-11-05 se obtuvo una autorización nueva de la misma app con los permisos de lectura y renovación ya aprobados. El flujo mantuvo el mutex del respaldo desde antes del consentimiento hasta retirar la copia de la conexión del visor. Un exportador privado reutilizó el descifrado del SDK sobre una copia detenida de SQLite; la base en uso conservó su esquema. La retirada de la conexión verificó propietario, destino, generación y contenido cifrado antes de cambiar únicamente esa fila. Se conservaron los documentos y los contenedores del IdP.
+
+La credencial del operador quedó en otro SSD, fuera de repositorios, del montaje de la aplicación y de la recuperación de documentos, con archivo `0600` y directorio `0700`. Después de retirar las copias de exportación y los usuarios sintéticos, se adelantó de forma conservadora el vencimiento local del access token para ejecutar una renovación real. El refresh token cambió y ambos tokens nuevos quedaron sincronizados a disco. No se ampliaron permisos.
+
+El reporte usó exclusivamente las dos [cuentas de prueba publicadas por Atlassian](https://developer.atlassian.com/cloud/jira/platform/user-privacy-developer-guide/#testing). El endpoint real devolvió `200`; la acción `closed` de la cuenta de prueba cerrada quedó guardada en un estado aislado, sin respuestas pendientes de interpretación. La beta recuperó salud `204` por HTTPS y el timer del respaldo siguió activo, con su mutex libre.
+
+Esta prueba verifica autenticación, rotación y respuesta real del protocolo. **No reportó el inventario de producción, no aplicó borrados a documentos reales y no instaló el reporting periódico.** El estado de prueba permanece separado del futuro estado de operación. Sharing sigue desactivado.
 
 ## Barrera externa y borrado
 
@@ -161,4 +171,6 @@ Las pruebas del reporte cubren lotes, ciclos por cuenta, antigüedad agregada, r
 
 Las pruebas de la barrera cubren varios propietarios, borrado de original o solo propuesta, actualización frente a captura posterior, conservación de conexiones, idempotencia, limpieza SQLite/WAL, rollback de la transacción ante inventario incompleto y rechazo de registro ausente, antiguo, enlazado, público o inválido. La CLI real valida publicación→borrado→recuperación filtrada; en la comprobación local también se ejecutó un binario anterior, que rechazó SQLite 6.
 
-Estas pruebas no acreditan el endpoint real de reporting de Atlassian, borrado de respaldos ni Sharing. Esos pasos siguen pendientes y el issue permanece abierto.
+Las 13 pruebas de renovación cubren persistencia de tokens, recuperación de una respuesta perdida dentro del plazo, rechazo de intentos antiguos, límites de respuesta, permisos, locks y compatibilidad con credenciales estáticas. El [CI de `2e0943c`](https://github.com/joalceco/mddiff/actions/runs/42045971311) aprobó código y contenedor.
+
+La validación real descrita arriba acredita el endpoint de Atlassian con sus cuentas de prueba. El inventario de producción, la aplicación de acciones al conjunto de respaldos y Sharing siguen pendientes; el issue permanece abierto.
