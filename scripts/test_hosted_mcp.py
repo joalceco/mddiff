@@ -71,6 +71,29 @@ def main():
             absent = tool(env, alice, "submit_proposal", {"expected_revision": 0, "candidate": {"label": "proposal.md", "markdown": "# No original yet\n"}})
             check(absent.get("isError") and absent["structuredContent"]["status"] == 409 and current(env, alice)["revision"] == 0, "MCP created a proposal without an original.")
 
+            phase = "agent submits both documents to an empty workspace"
+            agent = token(env, "load03")
+            previous = {"label": "previo.md", "markdown": "# Previo\r\n\r\nTexto 日本語.\r\n"}
+            actual = {"label": "actual.md", "markdown": "# Actual\r\n\r\nTexto 🌳.\r\n"}
+            pair = {"expected_revision": 0, "base": previous, "candidate": actual}
+            result = tool(env, agent, "submit_comparison", pair)
+            check(not result.get("isError") and result["structuredContent"]["revision"] == 1,
+                  "An agent could not open both documents in an empty workspace.")
+            committed = current(env, agent)
+            check(committed["base"] == previous and committed["candidate"] == actual,
+                  "Pair submission changed Markdown bytes or omitted a document.")
+            check(current(env, alice)["revision"] == current(env, bob)["revision"] == 0,
+                  "Pair submission changed another user's workspace.")
+            stale = tool(env, agent, "submit_comparison", pair)
+            check(stale.get("isError") and stale["structuredContent"]["status"] == 409,
+                  "Pair submission ignored its expected revision.")
+            invalid = tool(env, agent, "submit_comparison", {**pair, "expected_revision": 1,
+                "candidate": {"label": "too-large.md", "markdown": "x" * (2 * 1024 * 1024 + 1)}})
+            check(invalid.get("isError") and invalid["structuredContent"]["status"] == 413
+                  and current(env, agent) == committed, "Invalid second document partially replaced the pair.")
+            check(http(env, "/api/work", {**pair, "expected_revision": 1}, agent, "PUT")[0] == 200
+                  and current(env, agent)["revision"] == 2, "Bearer API could not submit both documents.")
+
             phase = "web-owned originals and stateless MCP"
             browsers = [TlsBrowser(env.base, env.runtime["issuer"], env.trust) for _ in range(2)]
             originals = []
@@ -81,7 +104,7 @@ def main():
             initialized = rpc(env, alice, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "mddiff-main-test", "version": "1"}})
             check(initialized["result"]["serverInfo"]["name"] == "mddiff-hosted", "MCP initialization returned a different server.")
             tools = rpc(env, alice, "tools/list")["result"]["tools"]
-            check({item["name"] for item in tools} == {"get_current_work", "submit_proposal"}, "Hosted tools include a path opener or omit a required tool.")
+            check({item["name"] for item in tools} == {"get_current_work", "submit_comparison", "submit_proposal"}, "Hosted tools include a path opener or omit a required tool.")
             check(all(not item["inputSchema"].get("additionalProperties", True) for item in tools), "A hosted tool accepts unspecified top-level arguments.")
             proposals = [{"label": "Propuesta sintética.md", "markdown": f"# Propuesta privada de {name}\r\n\r\nUnicode: 🌲.\r\n"} for name in ("alice", "bob")]
             for index, access in enumerate((alice, bob)):

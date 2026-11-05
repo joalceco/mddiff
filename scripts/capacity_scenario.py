@@ -10,12 +10,11 @@ import threading
 import time
 from urllib.parse import urlencode
 
-from container_client import DATA, Scenario
+from container_client import DATA, Scenario, work
 from hosted_mcp_fixture import TlsBrowser, http, token
 from test_hosted_auth import check, fixture
 from test_hosted_mcp import current, tool
 from test_hosted_persistence import Events
-from test_memos_source import connect, request, work
 
 
 @contextmanager
@@ -58,14 +57,13 @@ def close_event(event):
 
 
 class Capacity(Scenario):
-    def __init__(self, runtime, provider, base):
-        super().__init__(runtime, provider, base)
+    def __init__(self, runtime, base):
+        super().__init__(runtime, base)
         self.users = [name for name in runtime["users"] if name != "mallory"]
-        check(len(self.users) == 10 and set(self.users) == set(provider.memos), "Capacity needs ten distinct admitted synthetic owners.")
+        check(len(self.users) == 10, "Capacity needs ten distinct admitted synthetic owners.")
         self.access, self.csrf = {}, {}
         self.content_markers = {"CAPACITY-OWNER-" + user for user in self.users}
         self.capture_ms = []
-        provider.delay_seconds = .05
         self.bootstrap_metrics = {}
 
     def safe(self, raw):
@@ -84,21 +82,19 @@ class Capacity(Scenario):
             self.browsers[name] = browser
             self.access[name] = token(self.env, name); self.private.add(self.access[name])
             if first:
-                connect(browser, self.provider, name, 0)
                 started = time.perf_counter()
-                code, _ = request(browser, self.provider, "/api/sources/memos", "POST", {
-                    "destination": "notes", "reference": "shared", "expected_revision": 0})
+                original = {"label": "previo.md", "markdown": "# Previo " + name + "\r\n🌳"}
+                candidate = {"label": "actual.md", "markdown": "# Actual " + name + "\r\n日本語"}
+                result = tool(self.env, self.access[name], "submit_comparison", {"expected_revision": 0, "base": original, "candidate": candidate})
                 self.capture_ms.append((time.perf_counter() - started) * 1000)
-                check(code == 200, "A capacity owner could not capture its private original.")
-                self.expected[name] = work(browser, self.provider)
+                check(not result.get("isError"), "A capacity owner could not submit its own pair.")
+                self.expected[name] = work(browser)
             else:
-                check(work(browser, self.provider) == self.expected[name], "Ten-user recovery changed an owner's work or provenance.")
-                code, _ = request(browser, self.provider, "/api/connections/notes/check", "POST", {"expected_revision": 1})
-                check(code == 200 and self.provider.audit[-1]["user"] == name, "Ten-user recovery decrypted another owner's credential.")
+                check(work(browser) == self.expected[name], "Ten-user recovery changed an owner's work.")
             result = current(self.env, self.access[name])
             check(all(result[key] == self.expected[name][key] for key in ("revision", "base", "candidate")), "MCP read a different owner's work.")
             self.streams.append(Events(browser, self.expected[name]["revision"]))
-        self.bootstrap_metrics = {"memos_capture_end_to_end": summary(self.capture_ms), "synthetic_provider_delay_per_get_ms": 50}
+        self.bootstrap_metrics = {"agent_pair_end_to_end": summary(self.capture_ms)}
 
     def load(self, profile):
         check(profile in {"small", "near-limit"}, "Unknown capacity profile.")
@@ -129,7 +125,7 @@ class Capacity(Scenario):
                 metrics["rust_processing"].append(result["structuredContent"]["processing_ms"])
                 self.streams[index].revision(before + 2)
                 start = time.perf_counter()
-                after = work(browser, self.provider)
+                after = work(browser)
                 metrics["api_read"].append((time.perf_counter() - start) * 1000)
                 check(after["revision"] == before + 2 and after["base"] == original and after["candidate"] == proposed,
                       "Concurrent owners mixed or lost Markdown.")
@@ -180,7 +176,7 @@ class Capacity(Scenario):
             browser.login(self.runtime["users"][name]); self.csrf[name] = browser.session()["csrf_token"]
             self.browsers[name] = browser
             self.access[name] = token(self.env, name); self.private.add(self.access[name])
-            check(work(browser, self.provider) == before, "Evicting an idle workspace lost its persisted work.")
+            check(work(browser) == before, "Evicting an idle workspace lost its persisted work.")
             self.streams[0] = Events(browser, before["revision"])
         finally:
             fixture.request(owner_url + "/role-mappings/realm", [role], fixture.admin_token(self.runtime), "DELETE")
@@ -191,7 +187,7 @@ class Capacity(Scenario):
                                   opener=None if access else browser.opener)
             check(status == expected, "A boundary probe returned the wrong rejection status.")
             self.safe(raw)
-            check(work(browser, self.provider) == before, "A rejected boundary probe changed work.")
+            check(work(browser) == before, "A rejected boundary probe changed work.")
         for body in [
             {"expected_revision": before["revision"], "base": {"label": "too-large.md", "markdown": "x" * (2 * 1024 * 1024 + 1)}},
             {"expected_revision": before["revision"], "base": {"label": "lines.md", "markdown": "x\n" * 10001}},
@@ -216,22 +212,17 @@ class Capacity(Scenario):
                 headers={"Origin": self.base, "X-CSRF-Token": self.csrf[owner]}, opener=browser.opener)
             check(status == 413, "Concurrent JSON expansion did not fail within the rendering budget.")
             self.safe(raw)
-            check(work(browser, self.provider) == expected, "Concurrent rejected expansion replaced the saved pair.")
+            check(work(browser) == expected, "Concurrent rejected expansion replaced the saved pair.")
         with ThreadPoolExecutor(max_workers=10) as pool:
             list(pool.map(excessive_view, self.users))
         rejected({"expected_revision": before["revision"], "base": before["base"], "owner_id": other}, 422)
-        self.stage = "authorization and provider failures"
+        self.stage = "authorization and stale agent submissions"
         rejected({"expected_revision": before["revision"], "owner_id": other}, 422, "DELETE")
         rejected({"expected_revision": before["revision"]}, 403, "DELETE", access=self.access[name])
         rejected({"base_path": "/never-open/original.md", "candidate_path": "/never-open/proposal.md"}, 404, "POST", "/api/compare")
         failed = tool(self.env, self.access[name], "submit_proposal", {"expected_revision": before["revision"] - 1,
                                                                       "candidate": {"label": "stale.md", "markdown": "stale"}})
         check(failed.get("isError") and failed["structuredContent"]["status"] == 409, "Stale MCP overwrote current work.")
-        for mode in ("redirect", "provider-error"):
-            self.provider.mode = mode
-            rejected({"destination": "notes", "reference": "plain", "expected_revision": before["revision"]},
-                     502, "POST", "/api/sources/memos")
-        self.provider.mode = "normal"
         self.stage = "SSE and per-owner request quotas"
         extras = [Events(browser, before["revision"]) for _ in range(2)]
         status, raw, headers = http(self.env, "/api/events", opener=browser.opener)
@@ -241,33 +232,25 @@ class Capacity(Scenario):
             close_event(event)
         for event in self.streams:
             event.unchanged()
-        with ThreadPoolExecutor(max_workers=4) as pool, self.provider.pause("plain") as gate:
-            body = {"destination": "notes", "reference": "plain", "expected_revision": before["revision"]}
-            one = pool.submit(request, browser, self.provider, "/api/sources/memos", "POST", body)
-            check(gate.entered.wait(5), "The quota probe did not reach its controlled provider.")
-            others = [pool.submit(request, browser, self.provider, "/api/sources/memos", "POST", body) for _ in range(3)]
-            time.sleep(.5)
-            status, raw, headers = http(self.env, "/api/work", opener=browser.opener)
-            check(status == 429 and headers.get("Retry-After") == "1", "A fifth active request bypassed its owner's quota.")
-            check(work(self.browsers[other], self.provider) == self.expected[other], "A slow provider blocked another owner's work read.")
-            self.safe(raw); gate.release.set()
-            check(sorted(future.result(timeout=15)[0] for future in [one, *others]) == [200, 409, 409, 409], "Concurrent capture did not preserve CAS under quotas.")
-        self.expected[name] = work(browser, self.provider)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            body = {"expected_revision": before["revision"], "base": before["base"], "candidate": before["candidate"]}
+            futures = [pool.submit(http, self.env, "/api/work", body, access=self.access[name], method="PUT") for _ in range(4)]
+            check(sorted(future.result(timeout=15)[0] for future in futures) == [200, 409, 409, 409], "Concurrent pair submission did not preserve CAS.")
+        self.expected[name] = work(browser)
         self.streams[0].revision(before["revision"] + 1)
         for event in self.streams[1:]:
             event.unchanged()
-        check(work(self.browsers[other], self.provider) == self.expected[other], "A quota probe changed another owner.")
+        check(work(self.browsers[other]) == self.expected[other], "A quota probe changed another owner.")
         # A successful owner-only deletion must preserve all nine other users.
         revision = self.expected[name]["revision"]
         status, _, _ = http(self.env, "/api/work", {"expected_revision": revision}, method="DELETE",
                             headers={"Origin": self.base, "X-CSRF-Token": self.csrf[name]}, opener=browser.opener)
         check(status == 200, "The owner could not delete its own work.")
-        self.expected[name] = work(browser, self.provider)
+        self.expected[name] = work(browser)
         self.streams[0].revision(revision + 1)
         for index, owner in enumerate(self.users[1:], 1):
             self.streams[index].unchanged()
-            check(work(self.browsers[owner], self.provider) == self.expected[owner], "Deletion crossed the owner's boundary.")
-        self.provider.assert_read_only()
+            check(work(self.browsers[owner]) == self.expected[owner], "Deletion crossed the owner's boundary.")
 
     def stopped(self):
         for event in self.streams:
@@ -275,7 +258,7 @@ class Capacity(Scenario):
         with closing(sqlite3.connect(DATA / "work.sqlite3")) as database:
             check(database.execute("SELECT count(*) FROM current_work").fetchone()[0] == 10,
                   "The capacity run created history or lost a tombstone.")
-            check(database.execute("SELECT count(*) FROM encrypted_connections").fetchone()[0] == 10,
-                  "The capacity run lost private credentials.")
+            check(database.execute("SELECT count(*) FROM sqlite_master WHERE name='encrypted_connections'").fetchone()[0] == 0,
+                  "The capacity run retained connector credentials.")
         for path in DATA.iterdir():
             super().safe(path.read_bytes())

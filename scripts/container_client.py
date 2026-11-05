@@ -21,11 +21,9 @@ from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
 from hosted_mcp_fixture import TlsBrowser, audience_clients, http, tls_proxy, token
-from memos_fixture import memos
 from test_hosted_auth import CheckFailed, check, fixture, web_client
 from test_hosted_mcp import current, rpc, tool
 from test_hosted_persistence import Events
-from test_memos_source import connect, request, work
 
 
 DATA = Path("/var/lib/mddiff")
@@ -83,29 +81,31 @@ def initialize(tls):
     check(os.geteuid() == 10001 and os.getegid() == 10001, "The test client did not drop its bootstrap identity.")
 
 
-def configure(runtime, provider, base):
+def configure(runtime, base):
     fixture.private_write(SECRETS / "oidc.json", json.dumps({"issuer": runtime["issuer"], "public_origin": base,
         "client_id": "mddiff-hosted-web", "introspection_client_id": "mddiff-resource",
         "introspection_client_secret": runtime["resource_client"]["secret"], "audience": "mddiff-resource", "allow_insecure_loopback": True}))
-    key = SECRETS / "connections.key"
-    key.write_bytes(os.urandom(32)); key.chmod(0o600)
-    fixture.private_write(SECRETS / "connections.json", json.dumps({"key_file": str(key), "allow_insecure_loopback": True,
-        "memos": [{"id": "notes", "label": "Memos sintético", "url": provider.base, "addresses": ["127.0.0.1"]}]}))
     for path in SECRETS.iterdir():
         target = Path("/negative-secrets") / path.name
         target.write_bytes(path.read_bytes()); target.chmod(0o600)
-    (Path("/negative-secrets") / "connections.json").chmod(0o644)
+    (Path("/negative-secrets") / "oidc.json").chmod(0o644)
+
+
+def work(browser):
+    env = SimpleNamespace(base=browser.base)
+    code, raw, _ = http(env, "/api/work", opener=browser.opener)
+    check(code == 200, "Authenticated work read failed.")
+    return json.loads(raw)
 
 
 class Scenario:
-    def __init__(self, runtime, provider, base):
-        self.runtime, self.provider, self.base = runtime, provider, base
+    def __init__(self, runtime, base):
+        self.runtime, self.base = runtime, base
         self.env = SimpleNamespace(base=base, trust=ssl.create_default_context(cafile=str(SECRETS / "ca.pem")), runtime=runtime)
         self.expected = {}
         self.streams = []
         self.browsers = {}
-        self.ciphertexts = None
-        self.private = {runtime["admin_password"], runtime["resource_client"]["secret"], *provider.secrets,
+        self.private = {runtime["admin_password"], runtime["resource_client"]["secret"],
                         *(user["password"] for user in runtime["users"].values())}
 
     def safe(self, raw):
@@ -152,16 +152,15 @@ class Scenario:
             browser.login(self.runtime["users"][name]); browser.session()
             self.browsers[name] = browser
             if first:
-                connect(browser, self.provider, name, 0)
-                status, _ = request(browser, self.provider, "/api/sources/memos", "POST", {
-                    "destination": "notes", "reference": "shared", "expected_revision": 0})
-                check(status == 200, "Container could not capture its owner's original from Memos.")
-                self.expected[name] = work(browser, self.provider)
-                check(self.expected[name]["base"]["markdown"] == self.provider.documents[name, "shared"]["content"], "Container capture changed private Markdown bytes.")
+                access = token(self.env, name); self.private.add(access)
+                original = {"label": "previo.md", "markdown": "# Previo privado de " + name + "\r\n\r\n日本語 🌳.\r\n"}
+                candidate = {"label": "actual.md", "markdown": "# Actual privado de " + name + "\r\n"}
+                result = tool(self.env, access, "submit_comparison", {"expected_revision": 0, "base": original, "candidate": candidate})
+                check(not result.get("isError"), "Container agent could not submit both documents.")
+                self.expected[name] = work(browser)
+                check(self.expected[name]["base"] == original and self.expected[name]["candidate"] == candidate, "Container pair changed private Markdown bytes.")
             else:
-                check(work(browser, self.provider) == self.expected[name], "Container restart lost work, provenance or owner isolation.")
-                status, _ = request(browser, self.provider, "/api/connections/notes/check", "POST", {"expected_revision": 1})
-                check(status == 200 and self.provider.audit[-1]["user"] == name, "Restart could not decrypt the correct owner's Memos credential.")
+                check(work(browser) == self.expected[name], "Container restart lost work or owner isolation.")
             active.append(Events(browser, self.expected[name]["revision"]))
         self.streams = active
         for index, name in enumerate(("alice", "bob")):
@@ -176,11 +175,10 @@ class Scenario:
                 result = tool(self.env, access, "submit_proposal", {"expected_revision": before["revision"], "candidate": proposal})
                 check(not result.get("isError") and result["structuredContent"]["viewer_url"] == self.base + "/", "Container MCP could not commit an HTTPS-visible proposal.")
                 active[index].revision(before["revision"] + 1); active[1 - index].unchanged()
-                after = work(self.browsers[name], self.provider)
-                check(after["base"] == before["base"] and after.get("base_source") == before.get("base_source")
+                after = work(self.browsers[name])
+                check(after["base"] == before["base"]
                       and after["candidate"] == proposal and after["revision"] == before["revision"] + 1, "Container proposal changed its captured original or provenance.")
                 self.expected[name] = after
-        self.provider.assert_read_only()
 
     def stopped(self):
         for stream in self.streams:
@@ -192,22 +190,16 @@ class Scenario:
         for path in DATA.iterdir():
             check(path.is_file() and stat.S_IMODE(path.stat().st_mode) == 0o600 and path.stat().st_uid == 10001, "SQLite created a public or incorrectly owned file.")
             raw = path.read_bytes(); self.safe(raw)
-            check((SECRETS / "connections.key").read_bytes() not in raw, "SQLite stored its external encryption key.")
         with closing(sqlite3.connect(DATA / "work.sqlite3")) as database:
-            rows = database.execute("SELECT subject, revision, base_label, base_markdown, candidate_label, candidate_markdown, base_source FROM current_work").fetchall()
+            rows = database.execute("SELECT subject, revision, base_label, base_markdown, candidate_label, candidate_markdown FROM current_work").fetchall()
             check(len(rows) == 2, "Container storage lost private owners or created document history.")
             owners = {user["id"]: name for name, user in self.runtime["users"].items()}
-            for subject, revision, label, original, proposed_label, proposal, source in rows:
+            for subject, revision, label, original, proposed_label, proposal in rows:
                 expected = self.expected[owners[subject]]
                 check(revision == expected["revision"] and {"label": label, "markdown": original} == expected["base"]
-                      and {"label": proposed_label, "markdown": proposal} == expected["candidate"]
-                      and json.loads(source) == expected["base_source"], "Container persistence changed raw documents or provenance.")
-            encrypted = database.execute("SELECT subject, provider, destination, generation, nonce, ciphertext FROM encrypted_connections").fetchall()
-            check(len(encrypted) == 2 and all(kind == "memos" and destination == "notes" and revision == 1 and len(nonce) == 12 and len(ciphertext) >= 16
-                                            for _, kind, destination, revision, nonce, ciphertext in encrypted), "Container credentials are not private authenticated ciphertexts.")
-            current_ciphertexts = {subject: (nonce, ciphertext) for subject, _, _, _, nonce, ciphertext in encrypted}
-            check(self.ciphertexts is None or self.ciphertexts == current_ciphertexts, "A restart or read unexpectedly replaced encrypted credentials.")
-            self.ciphertexts = current_ciphertexts
+                      and {"label": proposed_label, "markdown": proposal} == expected["candidate"], "Container persistence changed raw documents or provenance.")
+            check(database.execute("PRAGMA user_version").fetchone()[0] == 7, "Container has a different schema.")
+            check(database.execute("SELECT count(*) FROM sqlite_master WHERE name='encrypted_connections'").fetchone()[0] == 0, "Connector credentials were retained.")
             with closing(sqlite3.connect("/negative-db/work.sqlite3")) as negative:
                 database.backup(negative)
         Path("/negative-db/work.sqlite3").chmod(0o644)
@@ -223,18 +215,17 @@ def main():
         with ExitStack() as resources:
             resources.enter_context(issuer_forwarder())
             users = [name for name in runtime["users"] if name != "mallory"] if payload.get("capacity") else ("alice", "bob")
-            provider = resources.enter_context(memos(users))
             with patch("hosted_mcp_fixture.certificates", return_value=(SECRETS / "ca.pem", SECRETS / "server.pem", SECRETS / "server.key")):
                 base, _ = resources.enter_context(tls_proxy(SECRETS, BASE_PORT))
-            configure(runtime, provider, base)
+            configure(runtime, base)
             resources.enter_context(audience_clients(runtime, base + "/mcp"))
             resources.enter_context(web_client(runtime, base))
             if payload.get("capacity"):
                 from capacity_scenario import Capacity, long_lived_clients
                 resources.enter_context(long_lived_clients(runtime))
-                scenario = Capacity(runtime, provider, base)
+                scenario = Capacity(runtime, base)
             else:
-                scenario = Scenario(runtime, provider, base)
+                scenario = Scenario(runtime, base)
             emit("ready", uid=os.geteuid(), gid=os.getegid(), origin=base)
             while line := sys.stdin.readline(2 * 1024 * 1024):
                 command = json.loads(line)
@@ -264,7 +255,7 @@ def main():
                     check(owner.st_uid == 0 and stat.S_IMODE(owner.st_mode) == 0o700, "Docker replaced the negative volume's owner fixture.")
                     check(mode.st_uid == 10001 and stat.S_IMODE(mode.st_mode) == 0o755, "Docker replaced the negative directory mode fixture.")
                     check(stat.S_IMODE(Path("/negative-db/work.sqlite3").stat().st_mode) == 0o644
-                          and stat.S_IMODE(Path("/negative-secrets/connections.json").stat().st_mode) == 0o644,
+                          and stat.S_IMODE(Path("/negative-secrets/oidc.json").stat().st_mode) == 0o644,
                           "The negative database or configuration fixture is not public as intended.")
                 else:
                     raise CheckFailed("Unknown container-test phase.")

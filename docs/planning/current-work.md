@@ -2,9 +2,9 @@
 
 Fecha: 2026-10-27. Issue: [#5](https://github.com/joalceco/mddiff/issues/5). Rama: `feature/multiuser-sources`.
 
-Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. [S08: captura de Memos](memos-source.md) añade procedencia en el esquema 3.
+Este documento registra S04 y su API con sesión web. [S06: agentes remotos](remote-agents.md) añade acceso Bearer, `PATCH /api/work` y MCP al mismo trabajo persistente. La simplificación del 2026-11-05 recibe ambos documentos del agente.
 
-La rama, al 2026-11-04, usa SQLite 6: el esquema 5 añade el inventario privado de Jira y el 6 registra la dependencia de una [barrera externa de privacidad](jira-privacy.md). Al activar esa barrera pueden borrarse documentos afectados por decisiones del proveedor; ese flujo se prueba localmente y todavía no está desplegado. La beta publicada mantiene SQLite 4, que incorporó metadatos opcionales de tipo y momento de recepción por lado para [el selector de orígenes](source-picker.md). La evidencia histórica de S04 se conserva al final.
+La rama usa SQLite 7 desde la simplificación del 2026-11-05: conserva únicamente el par actual y los metadatos de entrada por usuario. Se retiran credenciales y metadatos de conectores; consulta [el contrato vigente](agent-comparisons.md).
 
 [S12: contenedor alojado](container-deployment.md) amplía la operación mediante un bind explícito con OIDC, volumen y secretos externos. Las referencias al listener limitado a loopback corresponden a la entrega S04; los límites de borrado y retención siguen vigentes.
 
@@ -55,7 +55,7 @@ Los permisos son control de acceso del sistema de archivos, **no cifrado**: el M
 
 ## Modelo de datos y confirmación de escrituras
 
-La base utiliza [rusqlite 0.41](https://docs.rs/rusqlite/0.41.0/rusqlite/) con SQLite incorporado y una tabla `current_work` sin `ROWID`. Su clave primaria es `(issuer, subject)`; hay como máximo una fila por identidad que haya guardado o borrado un trabajo. S04 creó el esquema 1; S07 añadió conexiones cifradas en una tabla separada y S08 incorpora `base_source` para la procedencia del original en el esquema 3.
+La base utiliza [rusqlite 0.41](https://docs.rs/rusqlite/0.41.0/rusqlite/) con SQLite incorporado y una tabla `current_work` sin `ROWID`. Su clave primaria es `(issuer, subject)`; hay como máximo una fila por identidad que haya guardado o borrado un trabajo. El esquema 7 contiene únicamente esa tabla; la migración elimina las tablas y metadatos de los conectores retirados.
 
 La fila contiene la revisión y cuatro campos de contenido: `base_label`, `base_markdown`, `candidate_label` y `candidate_markdown`. Puede conservar un original sin propuesta. No se guardan versiones anteriores, HTML renderizado o diffs históricos.
 
@@ -146,9 +146,9 @@ Si se pierde la respuesta o el cliente se desconecta durante una escritura, cons
 
 No elimines WAL/SHM ni copies únicamente `work.sqlite3` mientras una instancia está abierta: los archivos auxiliares pueden formar parte del estado confirmado. Véase [el archivo WAL como parte del estado persistente](https://sqlite.org/wal.html#the_wal_file). Esta historia no implementa un mecanismo de backup ni una reparación automática de bases.
 
-Una base con `user_version > 4` se rechaza al iniciar. La migración de 3 a 4 añade dos columnas opcionales dentro de una transacción y conserva documentos, revisiones, procedencia externa y conexiones. Las capturas antiguas no reciben fechas inventadas. `GET /api/work` y MCP conservan su contrato; `/api/state` expone `base_input` y `candidate_input` cuando existen.
+Una base con `user_version > 7` se rechaza al iniciar. La migración a 7 copia etiquetas, textos, revisiones y metadatos de entrada en una transacción, y retira las credenciales y metadatos de conectores. Las capturas antiguas sin metadatos de entrada no reciben fechas inventadas. `GET /api/work` y MCP conservan sus documentos; `/api/state` expone `base_input` y `candidate_input` cuando existen.
 
-No hay downgrade automático; no reduzcas manualmente `user_version` para abrir una base con un binario anterior. El binario del esquema 3 no puede abrir una base migrada al 4. Antes de actualizar, conserva un checkpoint coherente de datos, claves, configuración e imagen compatible. Si necesitas recuperarlo, mantén el visor en mantenimiento: volver a esa copia descarta las escrituras posteriores a su captura.
+No hay downgrade automático; no reduzcas manualmente `user_version` para abrir una base con un binario anterior. Un binario anterior no debe abrir una base migrada al 7. Antes de actualizar, conserva un checkpoint coherente de datos, claves, configuración e imagen compatible. Si necesitas recuperarlo, mantén el visor en mantenimiento: volver a esa copia descarta las escrituras posteriores a su captura.
 
 ## Borrado funcional, copias y retención
 

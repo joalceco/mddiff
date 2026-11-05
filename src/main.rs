@@ -1,6 +1,5 @@
 mod auth;
 mod mcp;
-mod providers;
 
 use axum::{
     Extension, Json, Router,
@@ -41,7 +40,6 @@ struct App {
     port: u16,
     mode: Mode,
     auth: Option<Arc<auth::Authenticator>>,
-    connections: Option<Arc<providers::Providers>>,
 }
 
 impl App {
@@ -186,15 +184,11 @@ async fn quotas(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp")
-        || path.starts_with("/api/sources/")
-        || (path.starts_with("/api/connections/") && path.ends_with("/check"));
+    let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp");
     let permits = match (&app.mode, request.extensions().get::<VerifiedIdentity>()) {
         (Mode::Hosted(store), Some(identity)) if protected_content => {
             let kind = if path == "/api/events" {
                 RequestKind::Events
-            } else if path.starts_with("/api/sources/") || path.ends_with("/check") {
-                RequestKind::Source
             } else {
                 RequestKind::Content
             };
@@ -485,7 +479,6 @@ fn router(app: Arc<App>) -> Router {
     let router = if app.auth.is_some() {
         router
             .merge(auth::routes())
-            .merge(providers::routes())
             .route("/mcp", axum::routing::any(mcp::hosted_service))
             .layer(middleware::from_fn_with_state(Arc::clone(&app), quotas))
             .layer(middleware::from_fn_with_state(
@@ -511,11 +504,8 @@ struct Arguments {
     mode: CliMode,
     root: Option<PathBuf>,
     oidc_config: Option<PathBuf>,
-    connections_config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     operator_checkpoint_dir: Option<PathBuf>,
-    jira_privacy_file: Option<PathBuf>,
-    apply_jira_privacy: bool,
     bind: Ipv4Addr,
     port: u16,
     documents: Vec<PathBuf>,
@@ -529,11 +519,8 @@ fn parse_arguments(
         mode: CliMode::Local,
         root: None,
         oidc_config: None,
-        connections_config: None,
         data_dir: None,
         operator_checkpoint_dir: None,
-        jira_privacy_file: None,
-        apply_jira_privacy: false,
         bind: Ipv4Addr::LOCALHOST,
         port: 3847,
         documents: Vec::new(),
@@ -564,14 +551,6 @@ fn parse_arguments(
                         .into(),
                 );
             }
-            Some("--connections-config") => {
-                options.connections_config = Some(
-                    arguments
-                        .next()
-                        .ok_or("Falta el archivo después de --connections-config.")?
-                        .into(),
-                );
-            }
             Some("--operator-checkpoint-dir") => {
                 options.operator_checkpoint_dir = Some(
                     arguments
@@ -580,30 +559,20 @@ fn parse_arguments(
                         .into(),
                 );
             }
-            Some("--jira-privacy-file") => {
-                options.jira_privacy_file = Some(
-                    arguments
-                        .next()
-                        .ok_or("Falta el registro después de --jira-privacy-file.")?
-                        .into(),
-                );
-            }
-            Some("--apply-jira-privacy") => options.apply_jira_privacy = true,
             Some("--root") => {
                 options.root = Some(
                     arguments
                         .next()
                         .ok_or("Falta la ruta después de --root.")?
                         .into(),
-                )
+                );
             }
             Some("--port") => {
-                let port = arguments
+                options.port = arguments
                     .next()
-                    .ok_or("Falta el puerto después de --port.")?;
-                options.port = port
+                    .ok_or("Falta el puerto después de --port.")?
                     .to_str()
-                    .and_then(|value| value.parse().ok())
+                    .and_then(|s| s.parse().ok())
                     .ok_or("Puerto inválido.")?;
             }
             Some("--bind") => {
@@ -628,25 +597,9 @@ fn parse_arguments(
     if options.mode == CliMode::Local && options.oidc_config.is_some() {
         return Err("--oidc-config solo está disponible en modo alojado.".into());
     }
-    if options.jira_privacy_file.is_some() && options.mode != CliMode::Hosted {
-        return Err("--jira-privacy-file requiere modo hosted.".into());
-    }
-    if options.operator_checkpoint_dir.is_some()
-        && (options.mode != CliMode::Hosted || !cfg!(unix) || options.apply_jira_privacy)
+    if options.operator_checkpoint_dir.is_some() && (options.mode != CliMode::Hosted || !cfg!(unix))
     {
-        return Err("--operator-checkpoint-dir requiere un servidor hosted en Unix.".into());
-    }
-    if options.apply_jira_privacy
-        && (options.jira_privacy_file.is_none()
-            || options.oidc_config.is_some()
-            || options.connections_config.is_some())
-    {
-        return Err("--apply-jira-privacy requiere hosted, --data-dir y --jira-privacy-file, sin configuración de acceso o conexiones.".into());
-    }
-    if options.connections_config.is_some()
-        && (options.mode != CliMode::Hosted || options.oidc_config.is_none())
-    {
-        return Err("--connections-config requiere modo hosted y --oidc-config.".into());
+        return Err("--operator-checkpoint-dir requiere modo hosted en Unix.".into());
     }
     if (options.mode == CliMode::Hosted) != options.data_dir.is_some() {
         return Err(
@@ -686,21 +639,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [--jira-privacy-file ARCHIVO] [original.md propuesta.md]\nAplicación sin servidor: mddiff --mode hosted --data-dir CARPETA --jira-privacy-file ARCHIVO --apply-jira-privacy\nCheckpoint del operador: añadir --operator-checkpoint-dir CARPETA al servidor hosted en Unix; SIGUSR1 crea work.sqlite3 sin reemplazar una copia existente.\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [original.md propuesta.md]\nCheckpoint del operador: añadir --operator-checkpoint-dir CARPETA al servidor hosted en Unix; SIGUSR1 crea work.sqlite3 sin reemplazar una copia existente.\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
         );
         return Ok(());
     };
-    if arguments.apply_jira_privacy {
-        let store = Workspaces::persistent_with_barrier(
-            arguments.data_dir.as_deref().unwrap(),
-            arguments.jira_privacy_file.as_deref().unwrap(),
-        )?;
-        store.check_storage().await?;
-        println!(
-            "JIRA_PRIVACY_APPLIED: registro externo verificado y decisiones aplicadas; no se inició un servidor."
-        );
-        return Ok(());
-    }
     let auth = match &arguments.oidc_config {
         Some(path) => Some(Arc::new(
             auth::Authenticator::new(auth::Config::load(path)?).await?,
@@ -711,12 +653,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         CliMode::Local => Mode::Local(Arc::new(LocalReader::new(
             arguments.root.unwrap_or_else(|| PathBuf::from(".")),
         )?)),
-        CliMode::Hosted => Mode::Hosted(match &arguments.jira_privacy_file {
-            Some(path) => {
-                Workspaces::persistent_with_barrier(arguments.data_dir.as_deref().unwrap(), path)?
-            }
-            None => Workspaces::persistent(arguments.data_dir.as_deref().unwrap())?,
-        }),
+        CliMode::Hosted => Mode::Hosted(Workspaces::persistent(
+            arguments.data_dir.as_deref().unwrap(),
+        )?),
     };
     let checkpoint_directory = match (&arguments.operator_checkpoint_dir, &mode) {
         (Some(directory), Mode::Hosted(workspaces)) => {
@@ -734,24 +673,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let connections = match (&arguments.connections_config, &mode, &auth) {
-        (Some(path), Mode::Hosted(workspaces), Some(auth)) => {
-            let config = providers::Config::load(path)?;
-            let store = workspaces.connection_store(&config.key_file)?;
-            Some(Arc::new(providers::Providers::new(
-                config,
-                store,
-                auth.public_origin(),
-            )?))
-        }
-        _ => None,
-    };
-    let app = Arc::new(App {
-        mode,
-        port,
-        auth,
-        connections,
-    });
+    let app = Arc::new(App { mode, port, auth });
     if let [base, candidate] = arguments.documents.as_slice() {
         app.local_reader()?
             .open(base.clone(), Some(candidate.clone()))
@@ -837,7 +759,6 @@ mod tests {
             port: 3847,
             mode: Mode::Hosted(Workspaces::default()),
             auth: None,
-            connections: None,
         });
         assert!(app.local_reader().is_err());
         for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
@@ -1037,7 +958,6 @@ mod tests {
                 port: 3847,
                 mode,
                 auth: None,
-                connections: None,
             });
             for method in [Method::GET, Method::HEAD] {
                 let response = router(Arc::clone(&app))

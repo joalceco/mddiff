@@ -31,292 +31,9 @@ let textDraft = null;
 let importVersion = 0;
 const fileRevisions = { base: null, candidate: null };
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
-let connectionsVersion = 0;
-let connectionsBusy = false;
-let memosDestination = null;
-let memosSourceVersion = 0;
-let memosSourceBusy = false;
-let memosSourceRevision = null;
-let memosSourceConflict = false;
-let memosSourceProvider = "memos";
-
-function activeMemosSource(previous, version) {
-  return Boolean(previous && authentication === previous && memosSourceVersion === version && $("memos-source-dialog").open);
-}
-
-function setMemosSourceBusy(value) {
-  memosSourceBusy = value;
-  $("memos-source-dialog").setAttribute("aria-busy", String(value));
-  const unavailable = value || !$("memos-source-destination").options.length;
-  $("memos-source-destination").disabled = $("memos-source-reference").disabled = unavailable;
-  $("memos-source-open").disabled = unavailable || memosSourceConflict;
-  setBusy(busy);
-}
-
-function closeMemosSource() {
-  memosSourceVersion++;
-  memosSourceRevision = null;
-  memosSourceConflict = false;
-  $("memos-source-reference").value = "";
-  $("memos-source-destination").replaceChildren();
-  $("memos-source-status").textContent = "";
-  $("memos-source-error").textContent = "";
-  $("memos-source-error").hidden = true;
-  setMemosSourceBusy(false);
-  if ($("memos-source-dialog").open) $("memos-source-dialog").close();
-}
-
-async function memosSourceRequest(path, body, method) {
-  const previous = authentication;
-  const version = memosSourceVersion;
-  const data = await request(path, body, method);
-  if (!activeMemosSource(previous, version)) return null;
-  if (!await sameWebSession(previous)) {
-    if (activeMemosSource(previous, version)) endSession();
-    return null;
-  }
-  return activeMemosSource(previous, version) ? data : null;
-}
-
-function memosSourceError(error) {
-  $("memos-source-status").textContent = "";
-  $("memos-source-error").textContent = error.status === 409
-    ? "El trabajo cambió. Cierra y vuelve a abrir este diálogo para reintentar con el trabajo actual."
-    : error instanceof TypeError ? "No se pudo leer el origen. Comprueba la conexión y vuelve a intentarlo." : error.message || "No se pudo abrir el origen. Vuelve a intentarlo.";
-  $("memos-source-error").hidden = false;
-}
-
 function pendingTextImport() {
   return Boolean(textDraft && textDraft.version !== textDraft.savedVersion);
 }
-
-async function openMemosSource(provider = "memos") {
-  if (busy || memosSourceBusy || pendingTextImport() || !canImport("base")) return;
-  closeConnections();
-  closeMemosSource();
-  memosSourceProvider = provider;
-  const jira = provider === "jira";
-  const label = jira ? "Jira Cloud" : "Memos";
-  $("memos-source-title").textContent = `Abrir ${label}`;
-  $("memos-source-close").setAttribute("aria-label", `Cerrar Abrir ${label}`);
-  $("memos-source-description").textContent = jira
-    ? "La descripción reemplaza el original y conserva la propuesta actual. Se guarda una captura convertida de ADF a Markdown, con avisos cuando corresponda."
-    : "La nota reemplaza el original y conserva la propuesta actual. Se guarda una captura; no se sincroniza automáticamente.";
-  document.querySelector('label[for="memos-source-destination"]').textContent = `Conexión de ${label}`;
-  document.querySelector('label[for="memos-source-reference"]').textContent = jira ? "Clave o URL del issue" : "ID o URL de la nota";
-  $("memos-source-reference").placeholder = jira ? "PROJ-123 o URL del sitio autorizado" : "memos/abc123 o URL de esta instancia";
-  memosSourceRevision = session.revision;
-  const version = memosSourceVersion;
-  const previous = authentication;
-  $("memos-source-dialog").showModal();
-  $("memos-source-status").textContent = "Cargando conexiones…";
-  setMemosSourceBusy(true);
-  try {
-    const data = await memosSourceRequest("/api/connections");
-    if (!data) return;
-    const destinations = data.enabled ? (data.destinations || []).filter((item) => item.provider === provider && item.connected) : [];
-    for (const destination of destinations) {
-      const option = document.createElement("option");
-      option.value = destination.id; option.textContent = destination.label;
-      $("memos-source-destination").append(option);
-    }
-    $("memos-source-status").textContent = destinations.length
-      ? jira ? "Solo se lee la descripción, sin comentarios ni adjuntos." : "Solo se lee el contenido de la nota, sin adjuntos."
-      : `No hay conexiones de ${label} disponibles. Conecta tu cuenta desde Conexiones.`;
-  } catch (error) { if (activeMemosSource(previous, version)) memosSourceError(error); }
-  finally {
-    if (activeMemosSource(previous, version)) {
-      setMemosSourceBusy(false);
-      if ($("memos-source-destination").options.length) $("memos-source-reference").focus();
-    }
-  }
-}
-
-$("base-memos").addEventListener("click", () => openMemosSource("memos"));
-$("base-jira").addEventListener("click", () => openMemosSource("jira"));
-$("memos-source-close").addEventListener("click", closeMemosSource);
-$("memos-source-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeMemosSource(); });
-$("memos-source-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (memosSourceBusy || memosSourceConflict || !authentication || !$("memos-source-dialog").open || !$("memos-source-destination").value) return;
-  const version = memosSourceVersion;
-  const previous = authentication;
-  const reference = $("memos-source-reference").value.trim();
-  if (!reference) { $("memos-source-reference").focus(); return; }
-  $("memos-source-error").hidden = true;
-  $("memos-source-status").textContent = "Leyendo y guardando la captura…";
-  setMemosSourceBusy(true);
-  try {
-    const snapshot = await memosSourceRequest(`/api/sources/${memosSourceProvider}`, {
-      destination: $("memos-source-destination").value, reference, expected_revision: memosSourceRevision,
-    }, "POST");
-    if (!snapshot) return;
-    resetImports();
-    applySession(snapshot);
-    closeMemosSource();
-  } catch (error) {
-    if (activeMemosSource(previous, version)) {
-      memosSourceConflict = error.status === 409;
-      memosSourceError(error);
-    }
-  } finally { if (activeMemosSource(previous, version)) setMemosSourceBusy(false); }
-});
-
-function clearMemosForm() {
-  memosDestination = null;
-  $("memos-token").value = "";
-  $("memos-acknowledge").checked = false;
-  $("memos-form").hidden = true;
-}
-
-function closeConnections() {
-  connectionsVersion++;
-  clearMemosForm();
-  $("connections-list").replaceChildren();
-  $("connections-status").textContent = "";
-  $("connections-error").textContent = "";
-  $("connections-error").hidden = true;
-  setConnectionsBusy(false);
-  if ($("connections-dialog").open) $("connections-dialog").close();
-}
-
-function setConnectionsBusy(value) {
-  connectionsBusy = value;
-  $("connections-dialog").setAttribute("aria-busy", String(value));
-  for (const node of $("connections-dialog").querySelectorAll("[data-connection-action], #memos-token, #memos-acknowledge, #memos-submit, #memos-cancel")) node.disabled = value;
-}
-
-function activeConnections(previous, version) {
-  return Boolean(previous && authentication === previous && connectionsVersion === version && $("connections-dialog").open);
-}
-
-async function connectionsRequest(path, body, method) {
-  const previous = authentication;
-  const version = connectionsVersion;
-  const data = await request(path, body, method);
-  if (!activeConnections(previous, version)) return null;
-  if (!await sameWebSession(previous)) {
-    if (activeConnections(previous, version)) endSession();
-    return null;
-  }
-  return activeConnections(previous, version) ? data : null;
-}
-
-function connectionError(error) {
-  $("connections-status").textContent = "";
-  $("connections-error").textContent = error.message || "No se pudo actualizar la conexión. Vuelve a intentarlo.";
-  $("connections-error").hidden = false;
-}
-
-async function loadConnections() {
-  const data = await connectionsRequest("/api/connections");
-  if (!data) return false;
-  const connectionDestinations = data.enabled ? data.destinations || [] : [];
-  const list = document.createDocumentFragment();
-  for (const destination of connectionDestinations) {
-    const row = document.createElement("li");
-    row.dataset.destination = destination.id;
-    const details = document.createElement("div");
-    details.className = "connection-details";
-    const title = document.createElement("strong"); title.textContent = destination.label;
-    const address = document.createElement("span"); address.className = "connection-address"; address.textContent = `${destination.provider === "jira" ? "Jira" : "Memos"} · ${destination.url}`;
-    const state = document.createElement("span"); state.className = "connection-state"; state.textContent = destination.connected ? "Conectada" : "Sin conectar";
-    details.append(title, address, state);
-    const actions = document.createElement("div"); actions.className = "connection-actions";
-    const entries = [[destination.connected ? "Reconectar" : "Conectar", "connect"]];
-    if (destination.connected) entries.push(["Comprobar", "check"], ["Desconectar", "disconnect"]);
-    for (const [label, action] of entries) {
-      const button = document.createElement("button"); button.type = "button"; button.textContent = label;
-      button.dataset.connectionAction = action;
-      button.setAttribute("aria-label", `${label} ${destination.label}`);
-      button.addEventListener("click", () => connectionAction(destination, action));
-      actions.append(button);
-    }
-    row.append(details, actions); list.append(row);
-  }
-  $("connections-list").replaceChildren(list);
-  $("connections-status").textContent = !data.enabled ? "Las conexiones no están habilitadas en este servidor." : connectionDestinations.length ? "Cada conexión pertenece únicamente a tu cuenta." : "No hay destinos aprobados disponibles. Consulta al administrador.";
-  return true;
-}
-
-async function openConnections(message = "") {
-  if (!hosted || !authentication) return;
-  closeConnections();
-  const version = connectionsVersion;
-  const previous = authentication;
-  $("connections-dialog").showModal();
-  $("connections-status").textContent = "Cargando destinos…";
-  setConnectionsBusy(true);
-  try {
-    if (await loadConnections() && message) $("connections-status").textContent = message;
-  } catch (error) { if (activeConnections(previous, version)) connectionError(error); }
-  finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
-}
-
-async function connectionAction(destination, action) {
-  if (connectionsBusy || !authentication || !$("connections-dialog").open) return;
-  clearMemosForm();
-  $("connections-error").hidden = true;
-  if (action === "connect" && destination.provider === "memos") {
-    memosDestination = destination;
-    $("memos-title").textContent = `Conectar Memos · ${destination.label}`;
-    $("memos-form").hidden = false;
-    $("memos-token").focus();
-    return;
-  }
-  const version = connectionsVersion;
-  const previous = authentication;
-  const path = `/api/connections/${encodeURIComponent(destination.id)}`;
-  setConnectionsBusy(true);
-  $("connections-status").textContent = action === "connect" ? "Abriendo autorización de Jira…" : action === "check" ? "Comprobando conexión…" : "Desconectando…";
-  try {
-    const data = await connectionsRequest(action === "connect" ? `${path}/authorize` : action === "check" ? `${path}/check` : path, { expected_revision: destination.revision }, action === "disconnect" ? "DELETE" : "POST");
-    if (!data) return;
-    if (action === "connect") {
-      const url = new URL(data.authorization_url);
-      if (url.protocol !== "https:" || url.username || url.password) throw new Error("La autorización de Jira no está disponible. Vuelve a intentarlo.");
-      window.location.assign(url.href);
-    } else if (await loadConnections()) {
-      $("connections-status").textContent = action === "check" ? "Conexión comprobada." : "Conexión eliminada de mddiff. Tu trabajo se conserva.";
-    }
-  } catch (error) {
-    if (activeConnections(previous, version)) {
-      if (error.status === 409) await loadConnections().catch(() => {});
-      if (activeConnections(previous, version)) connectionError(error);
-    }
-  } finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
-}
-
-$("connections-button").addEventListener("click", () => openConnections());
-$("connections-close").addEventListener("click", closeConnections);
-$("connections-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeConnections(); });
-$("connections-dialog").addEventListener("close", () => { if (!$("connections-dialog").open) clearMemosForm(); });
-$("memos-cancel").addEventListener("click", clearMemosForm);
-$("memos-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (connectionsBusy || !memosDestination || !authentication || !$("connections-dialog").open || !$("memos-acknowledge").checked) return;
-  const destination = memosDestination;
-  const token = $("memos-token").value;
-  if (!token.trim()) { $("memos-token").focus(); return; }
-  const version = connectionsVersion;
-  const previous = authentication;
-  $("memos-token").value = "";
-  $("memos-acknowledge").checked = false;
-  $("connections-error").hidden = true;
-  setConnectionsBusy(true);
-  $("connections-status").textContent = "Guardando conexión…";
-  try {
-    const data = await connectionsRequest(`/api/connections/${encodeURIComponent(destination.id)}/memos`, { expected_revision: destination.revision, token, acknowledge_full_access: true }, "POST");
-    if (!data) return;
-    clearMemosForm();
-    if (await loadConnections()) $("connections-status").textContent = "Conexión guardada. mddiff solo realiza lecturas.";
-  } catch (error) {
-    if (activeConnections(previous, version)) {
-      if (error.status === 409) { clearMemosForm(); await loadConnections().catch(() => {}); }
-      if (activeConnections(previous, version)) connectionError(error);
-    }
-  } finally { if (activeConnections(previous, version)) setConnectionsBusy(false); }
-});
 
 async function request(path, body, method = "POST") {
   const response = await fetch(path, body === undefined ? (hosted && authentication && path.startsWith("/api/")
@@ -342,17 +59,13 @@ function showError(error) {
 
 function setBusy(value) {
   busy = value;
-  const working = value || memosSourceBusy;
+  const working = value;
   for (const id of ["reload-button", "example-button", "delete-work"]) {
     $(id).disabled = working;
     $(id).setAttribute("aria-busy", String(working));
   }
   $("reload-button").disabled = working || !$("base-path").value.trim();
-  $("base-memos").disabled = working || !canImport("base") || pendingTextImport();
-  $("base-jira").disabled = $("base-memos").disabled;
-  $("base-refresh-source").disabled = $("base-memos").disabled || !session?.base_source;
-  $("base-refresh-source").setAttribute("aria-busy", String(working));
-  $("candidate-agent").disabled = working || !canImport("candidate") || pendingTextImport();
+  $("candidate-agent").disabled = working || !canImport("base") || pendingTextImport();
   const pending = textDraft && !textDraft.conflict && textDraft.version !== textDraft.savedVersion && textDraft.version !== textDraft.failedVersion;
   for (const side of ["base", "candidate"]) {
     for (const control of ["paste", "upload", "file"]) {
@@ -636,68 +349,10 @@ function renderManualSource(side) {
   sourceTime(node, input.captured_at, "Recibido", "received");
 }
 
-function renderBaseSource() {
+function renderInputs() {
+  renderManualSource("base");
   renderManualSource("candidate");
-  const node = $("base-provenance");
-  const source = hosted && authentication && session?.base_source;
-  $("base-refresh-source").hidden = !source;
-  if (!source) { renderManualSource("base"); return; }
-  node.replaceChildren();
-  node.hidden = false;
-  const label = `${source.provider === "jira" ? "Jira Cloud" : "Memos"} · ${source.resource}`;
-  let url;
-  try {
-    url = new URL(source.url);
-    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.origin === window.location.origin;
-    if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password) url = null;
-  } catch { url = null; }
-  const origin = document.createElement(url ? "a" : "span");
-  origin.textContent = label;
-  if (url) { origin.href = url.href; origin.target = "_blank"; origin.rel = "noopener noreferrer"; }
-  node.append(origin);
-  if (source.title) {
-    const title = document.createElement("span"); title.className = "source-title"; title.textContent = source.title; node.append(title);
-  }
-  sourceTime(node, source.captured_at, "Capturado", "captured");
-  sourceTime(node, source.updated_at, "Origen actualizado", "updated");
-  const frozen = document.createElement("span"); frozen.textContent = "Captura fija · sin sincronización automática"; node.append(frozen);
-  if (source.converter) {
-    const converter = document.createElement("span"); converter.textContent = `Conversión ${source.converter}`; node.append(converter);
-  }
-  if (Array.isArray(source.warnings) && source.warnings.length) {
-    const warnings = document.createElement("div"); warnings.className = "source-warnings";
-    const heading = document.createElement("strong"); heading.textContent = "Avisos de conversión";
-    const list = document.createElement("ul");
-    for (const text of source.warnings) { const item = document.createElement("li"); item.textContent = text; list.append(item); }
-    warnings.append(heading, list); node.append(warnings);
-  }
 }
-
-$("base-refresh-source").addEventListener("click", async () => {
-  if (busy || memosSourceBusy || pendingTextImport() || !canImport("base") || !session?.base_source) return;
-  const source = session.base_source;
-  if (!["jira", "memos"].includes(source.provider)) return;
-  const expected = session.revision;
-  const previous = authentication;
-  const version = importVersion;
-  setBusy(true);
-  importStatus("base", "Actualizando captura del origen…");
-  try {
-    const snapshot = await request(`/api/sources/${source.provider}`, { destination: source.destination, reference: source.resource, expected_revision: expected }, "POST");
-    if (authentication !== previous || importVersion !== version) return;
-    if (!await sameWebSession(previous)) { if (authentication === previous) endSession(); return; }
-    applySession(snapshot);
-    importStatus("base", "Captura actualizada. La propuesta se conserva.");
-  } catch (error) {
-    if (authentication !== previous || importVersion !== version) return;
-    if (error.status === 409) {
-      await refresh();
-      if (authentication !== previous || importVersion !== version) return;
-      error.message = "El trabajo cambió durante la lectura. Se conserva el trabajo reciente; vuelve a pulsar Actualizar origen para reintentar.";
-    }
-    importError("base", error);
-  } finally { setBusy(false); }
-});
 
 $("candidate-agent").addEventListener("click", () => {
   const help = $("candidate-agent-help");
@@ -779,7 +434,7 @@ function render() {
   }
   $("base-name").textContent = (hosted ? session?.base_path : fileName(session?.base_path)) || "Sin archivo";
   $("candidate-name").textContent = (hosted ? session?.candidate_path : fileName(session?.candidate_path)) || "Sin archivo";
-  renderBaseSource();
+  renderInputs();
   if (!hasDocument) {
     changes = [];
     changeIndex = -1;
@@ -879,7 +534,7 @@ $("source-tab").addEventListener("click", () => { if (format === "source") retur
 $("previous-change").addEventListener("click", () => navigateChange(-1));
 $("next-change").addEventListener("click", () => navigateChange(1));
 document.addEventListener("keydown", (event) => {
-  if ($("connections-dialog").open || $("memos-source-dialog").open || event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,select,textarea,[contenteditable=true]")) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,select,textarea,[contenteditable=true]")) return;
   if (event.key === "j" || event.key === "k") { event.preventDefault(); navigateChange(event.key === "j" ? 1 : -1); }
 });
 
@@ -896,8 +551,6 @@ function hostedView(title, description) {
 
 function endSession() {
   authentication = null;
-  closeConnections();
-  closeMemosSource();
   resetImports();
   clearTimeout(reconnectTimer);
   events?.close();
@@ -909,7 +562,6 @@ function endSession() {
   $("base-path").value = $("candidate-path").value = "";
   $("auth-user").textContent = "";
   $("auth-user").hidden = $("logout-button").hidden = true;
-  $("connections-button").hidden = true;
   $("login-button").hidden = false;
   $("connection").textContent = "Sin sesión";
   $("connection").classList.remove("connected");
@@ -968,8 +620,6 @@ function connectEvents() {
 
 $("login-button").addEventListener("click", () => { window.location.assign("/auth/login"); });
 $("logout-button").addEventListener("click", async () => {
-  closeConnections();
-  closeMemosSource();
   $("logout-button").disabled = true;
   try {
     await request("/auth/logout", {});
@@ -988,16 +638,9 @@ async function start() {
     authentication = await response.json();
     $("auth-user").textContent = authentication.user_label;
     $("auth-user").hidden = $("logout-button").hidden = false;
-    $("connections-button").hidden = false;
-    hostedView("Tu espacio privado", "Pega el original o sube un Markdown desde su cabecera para empezar.");
+    hostedView("Tu espacio privado", "Pide a tu agente que envíe el previo y el actual, o carga los Markdown desde sus cabeceras.");
     $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
     connectEvents();
-    const result = new URL(window.location.href).searchParams.get("connection");
-    if (["connected", "error"].includes(result)) {
-      const url = new URL(window.location.href); url.searchParams.delete("connection");
-      history.replaceState(null, "", url.pathname + url.search + url.hash);
-      await openConnections(result === "connected" ? "Conexión completada." : "No se pudo conectar Jira. Vuelve a intentarlo.");
-    }
   } catch (error) { showError(error); }
 }
 start();

@@ -21,16 +21,8 @@ jobs:
         run: cargo +stable clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo +stable test --locked
-      - name: Test Jira privacy inventory and reporting protocol
-        run: |
-          python3 scripts/test_jira_privacy_report.py
-          python3 scripts/test_jira_report_credential.py
       - name: Build release
         run: cargo +stable build --release --locked
-      - name: Test external erasure barrier and stale checkpoint recovery
-        run: |
-          python3 scripts/test_jira_erasure.py
-          python3 scripts/test_jira_privacy_recovery.py
       - name: Test MCP and viewer updates
         run: python3 scripts/test_mcp.py
       - name: Test local and hosted mode boundaries
@@ -39,12 +31,6 @@ jobs:
         run: npm ci --prefix tests/browser
       - name: Install test Chromium
         run: npx --prefix tests/browser playwright install --with-deps chromium
-      - name: Test personal connection controls in Chromium
-        run: node tests/browser/connections.mjs
-      - name: Test Memos capture controls in Chromium
-        run: node tests/browser/memos.mjs
-      - name: Test source selection, provenance and explicit refresh in Chromium
-        run: node tests/browser/sources.mjs
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test hosted authentication
@@ -55,12 +41,6 @@ jobs:
         run: python3 scripts/test_hosted_imports.py
       - name: Test hosted API and MCP over verified HTTPS
         run: python3 scripts/test_hosted_mcp.py
-      - name: Test private read-only provider connections
-        run: python3 scripts/test_connections.py
-      - name: Test private Memos source capture
-        run: python3 scripts/test_memos_source.py
-      - name: Test private Jira description capture and ADF fidelity
-        run: python3 scripts/test_jira_source.py
       - name: Test concurrent agents, private events and real browser tabs
         run: python3 scripts/test_coordination.py
       - name: Remove synthetic Keycloak
@@ -75,11 +55,8 @@ jobs:
         run: |
           docker compose -f deploy/compose.yaml config --quiet
           docker compose -f deploy/compose.yaml -f deploy/compose.loopback.yaml config --quiet
-          docker compose -f deploy/compose.yaml -f deploy/compose.privacy.yaml config --quiet
       - name: Build the Linux image
         run: docker build --tag mddiff:ci .
-      - name: Test privacy ownership, read-only authority and live checkpoints
-        run: sudo -n python3 scripts/test_privacy_container.py --image mddiff:ci
       - name: Start synthetic Keycloak
         run: python3 spikes/identity/keycloak.py up
       - name: Test isolated hosted container and persistent volumes

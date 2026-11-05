@@ -1,5 +1,7 @@
 # S12: contenedor alojado con datos y secretos separados
 
+Alcance vigente: [comparaciones del agente](agent-comparisons.md). Se retiran los conectores por decisión del 2026-11-05.
+
 Issue: [#13](https://github.com/joalceco/mddiff/issues/13). Rama: `feature/multiuser-sources`.
 
 Esta entrega prepara una instancia de mddiff para ejecutarse detrás de un proxy HTTPS. Incluye imagen, Compose, ejemplos de configuración, endpoint de salud y comprobaciones sintéticas. No publica el servicio ni configura DNS, certificados, router o cluster. El despliegue posterior por invitación se documenta en [S14](beta-operations.md); Google/GitHub sigue pendiente. [S13](capacity-validation.md) añade cuotas y la medición sintética de diez sesiones.
@@ -14,19 +16,18 @@ Todos los dominios y rutas de este documento son ejemplos. Mantén la configurac
 | Proceso | UID `10001`, GID `10001`, sistema raíz de solo lectura, `cap_drop: ALL` y `no-new-privileges`. Compose limita a 128 procesos, 512 MiB sin swap y una CPU. |
 | Listener | Modo hosted en `0.0.0.0:3847` dentro del contenedor. Fuera de `127.0.0.1` exige hosted con OIDC y una IPv4 privada o `0.0.0.0`. |
 | Trabajo | Un directorio local persistente en `/var/lib/mddiff`, `0700`, con `work.sqlite3` y auxiliares SQLite privados. Una instancia por base. |
-| Secretos | Archivos normales `0600`, propiedad de `10001:10001`, montados en solo lectura bajo `/run/secrets/mddiff/`. La clave no pertenece al directorio de datos. |
+| Secretos | Archivos normales `0600`, propiedad de `10001:10001`, montados en solo lectura bajo `/run/secrets/mddiff/`. |
 
 El [`Dockerfile`](../../Dockerfile) compila el visor dentro del binario. La [lista permitida de `.dockerignore`](../../.dockerignore) limita el contexto a `Cargo.toml`, `Cargo.lock`, `Dockerfile`, `src/**/*.rs` y los tres assets `web/index.html`, `web/app.js` y `web/style.css`. Excluye los demás archivos, incluso dentro de `src/` y `web/`; no incorpora bases, documentos personales, fixtures, `.git` o secretos. Docker documenta cómo filtra ese contexto en [archivos `.dockerignore`](https://docs.docker.com/build/concepts/context/#dockerignore-files).
 
 El builder usa Rust `1.95.0` sobre Bookworm y un solo trabajo de compilación (`--jobs 1`) para reducir la memoria necesaria. Las bases Rust y Debian Bookworm están fijadas por digest; `apt` instala las versiones disponibles de `ca-certificates` y `curl` para recibir sus actualizaciones. Esa fijación no promete imágenes idénticas byte por byte entre compilaciones. Conserva la referencia de la imagen que vayas a ejecutar.
 
-[`deploy/compose.yaml`](../../deploy/compose.yaml) inicia solo mddiff en una red Docker privada, sin publicar puertos del host. El proxy puede compartir esa red y usar `mddiff:3847` como upstream. La aplicación necesita salida HTTPS hacia el IdP y los destinos autorizados; la ausencia de puertos publicados no sustituye las reglas de acceso a la red.
+[`deploy/compose.yaml`](../../deploy/compose.yaml) inicia solo mddiff en una red Docker privada, sin publicar puertos del host. El proxy puede compartir esa red y usar `mddiff:3847` como upstream. La aplicación necesita salida HTTPS hacia el IdP; la ausencia de puertos publicados no sustituye las reglas de acceso a la red.
 
 Compose usa `restart: unless-stopped`, `init: true` y 15 segundos de margen de parada. Sus límites de CPU, memoria y procesos son una configuración inicial; el perfil medido de diez sesiones y sus cuotas se documentan en [S13](capacity-validation.md). Los bind mounts tienen `create_host_path: false`: prepara los archivos y directorios antes de arrancar, en lugar de esperar que Docker cree una ruta ausente.
 
 Si el proxy se ejecuta en el host, el override [`deploy/compose.loopback.yaml`](../../deploy/compose.loopback.yaml) publica únicamente `127.0.0.1:3847`. No uses una publicación en todas las interfaces ni el modo de red del host para simplificar esa conexión. Las opciones de usuario, montajes, salud y protección del servicio se describen en la [referencia de servicios Compose](https://docs.docker.com/reference/compose-file/services/).
 
-El overlay opcional [`deploy/compose.privacy.yaml`](../../deploy/compose.privacy.yaml) requiere dos directorios adicionales: `MDDIFF_PRIVACY_DIR`, con el registro externo de decisiones en solo lectura, y `MDDIFF_CHECKPOINT_DIR`, para una copia temporal de SQLite en lectura/escritura. Ambos requieren `0700` y el propietario del servicio; el registro requiere `0600`. Mantén las carpetas separadas de los datos y entre sí. Ajusta los UID/GID del host si existen user namespaces. El checkpoint se solicita mediante señal al proceso, conserva las sesiones y contiene información privada de todas las identidades. Sigue el [contrato de captura y consumo](jira-privacy.md#checkpoint-del-operador-sin-reiniciar) antes de activar este overlay; el ciclo completo de privacidad todavía no está publicado en la beta.
 
 ## Preparar datos y archivos privados en Linux
 
@@ -55,32 +56,17 @@ Los comandos de permisos siguientes corresponden a Docker Linux sin remapeo de u
    ```sh
    install -d -m 0700 "$HOME/.config/mddiff-deploy"
    install -m 0600 deploy/examples/oidc.json.example "$HOME/.config/mddiff-deploy/oidc.json"
-   install -m 0600 deploy/examples/connections.json.example "$HOME/.config/mddiff-deploy/connections.json"
    ```
 
-   Edita esas copias privadas con los valores del entorno. Los ejemplos [OIDC](../../deploy/examples/oidc.json.example) y [conexiones](../../deploy/examples/connections.json.example) no deben completarse con secretos reales en el checkout. El segundo empieza con una lista Memos vacía para que agregues únicamente destinos aprobados.
+   Edita la copia privada de OIDC con los valores del entorno. Conserva el ejemplo del repositorio sin secretos.
 
-4. Genera la clave de conexiones **una sola vez**, solo para una instalación nueva sin clave previa:
-
-   ```sh
-   sudo sh -euC -c '
-     umask 077
-     openssl rand 32 > "$1"
-     chown 10001:10001 "$1"
-     chmod 0600 "$1"
-   ' sh "$MDDIFF_SECRETS_DIR/connections.key"
-   ```
-
-   `-C` impide sobrescribir un archivo existente. La clave contiene 32 bytes binarios, sin codificación hex o Base64. Si hay una clave existente, consérvala: generar otra no recupera las credenciales cifradas. Si el comando falla, revisa el archivo y el error antes de repetirlo; no lo reemplaces a ciegas.
-
-5. Instala las configuraciones ya completadas con la propiedad y permisos que exige el proceso:
+4. Instala la configuración ya completadas con la propiedad y permisos que exige el proceso:
 
    ```sh
    sudo install -m 0600 -o 10001 -g 10001 "$HOME/.config/mddiff-deploy/oidc.json" "$MDDIFF_SECRETS_DIR/oidc.json"
-   sudo install -m 0600 -o 10001 -g 10001 "$HOME/.config/mddiff-deploy/connections.json" "$MDDIFF_SECRETS_DIR/connections.json"
    ```
 
-No pases tokens, contraseñas o la clave en variables de entorno, argumentos, instrucciones del Dockerfile o comandos de construcción. Compose recibe únicamente `MDDIFF_IMAGE`, `MDDIFF_DATA_DIR` y `MDDIFF_SECRETS_DIR`. Los tres archivos privados se montan en solo lectura; modificar un archivo del host para una actualización requiere reiniciar el servicio y volver a comprobarlo.
+No pases tokens o contraseñas en variables de entorno, argumentos, instrucciones del Dockerfile o comandos de construcción. Compose recibe únicamente `MDDIFF_IMAGE`, `MDDIFF_DATA_DIR` y `MDDIFF_SECRETS_DIR`. El archivo OIDC se monta en solo lectura; modificar un archivo del host para una actualización requiere reiniciar el servicio y volver a comprobarlo.
 
 ### Configuración OIDC y callbacks
 
@@ -91,20 +77,11 @@ Registra estos retornos con el mismo origen canónico, sin comodines:
 | Uso | Valor de ejemplo |
 | --- | --- |
 | Login web OIDC | `https://review.example/auth/callback` |
-| Consentimiento personal Jira | `https://review.example/connections/jira/callback` |
 | Recurso y audiencia MCP | `https://review.example/mcp` |
 
-El recurso MCP utiliza su propio cliente OAuth y el scope `mddiff:compare`; no recibe los secretos de Jira/Memos. Conserva el mapper de audiencia del cliente de introspección además del mapper del recurso MCP. Consulta [la configuración de agentes remotos](remote-agents.md#preparar-el-cliente-oauth-en-keycloak).
+El recurso MCP utiliza su propio cliente OAuth y el scope `mddiff:compare`; no recibe credenciales de servicios documentales. Conserva el mapper de audiencia del cliente de introspección además del mapper del recurso MCP. Consulta [la configuración de agentes remotos](remote-agents.md#preparar-el-cliente-oauth-en-keycloak).
 
 La administración concede el rol `mddiff-user` a las identidades admitidas y mantiene desactivado el registro abierto. La disponibilidad del contenedor no crea una política de invitados ni habilita login social por sí sola.
-
-### Configuración de conexiones
-
-En la copia privada de `connections.json`, `key_file` debe ser **`/run/secrets/mddiff/connections.key`**, la ruta dentro del contenedor. Los destinos Memos y Jira se fijan en administración; no se configura una descarga arbitraria de URLs.
-
-Memos admite el contrato `0.31.0`; configura `memos[].id`, `label`, `url` y, si requiere una instancia privada, las direcciones exactas aprobadas en `addresses`. No añadas rangos de red completos. Jira utiliza `client_id`, `client_secret` y `sites` con `id`, `label`, `url` y `cloud_id`. Puedes omitir `jira` o dejar vacía la lista Memos. No uses `jira_test_origin` ni la excepción HTTP de la fixture en producción. Consulta [los límites de destinos y credenciales](personal-connections.md#preparar-la-configuración-privada).
-
-El ejemplo Compose habilita conexiones mediante ese archivo. La clave de cifrado debe conservarse por separado del volumen; perderla impide recuperar las conexiones, aunque siga disponible el Markdown guardado.
 
 ## Construir e iniciar una instancia
 
@@ -175,17 +152,16 @@ Fuera de Compose, hosted sin OIDC puede arrancar cerrado en loopback para compat
 
 ## Datos, actualización y recuperación
 
-El volumen contiene Markdown en claro, procedencia y credenciales de conexiones cifradas. Los permisos Unix y el cifrado de credenciales no protegen contra un administrador con acceso al proceso, a la clave o al host. No adjuntes SQLite, WAL, SHM, archivos privados o logs con contenido a issues.
+El volumen contiene Markdown en claro y metadatos de entrada. Los permisos Unix no protegen contra un administrador con acceso al proceso o al host. No adjuntes SQLite, WAL, SHM, archivos privados o logs con contenido a issues.
 
 Antes de actualizar, conserva la referencia de imagen actual y revisa las migraciones de esquema. Un binario antiguo puede rechazar una base migrada; cambiar únicamente la etiqueta de imagen no garantiza un rollback. [S14](beta-operations.md) documenta la copia coherente, siete copias diarias cifradas, recuperación del IdP y de la clave, restauración y rollback verificados. Compose no crea por sí mismo esos backups: la instalación utiliza un timer externo.
 
 | Problema | Acción |
 | --- | --- |
-| Arranque rechazado | Revisa archivos requeridos, `0600`, UID/GID, JSON, clave binaria y conectividad al issuer HTTPS. No relajes permisos o la validación TLS. |
+| Arranque rechazado | Revisa archivos requeridos, `0600`, UID/GID, JSON y conectividad al issuer HTTPS. No relajes permisos o la validación TLS. |
 | Base ocupada o sin escritura | Detén la instancia duplicada y revisa directorio, propietario y espacio. No borres WAL/SHM para forzar el arranque. |
 | Salud `503` | Comprueba inicialización OIDC y lectura SQLite; después verifica login por separado. |
 | Proxy devuelve `403` | Revisa Host/Origin y el origen canónico sin quitar controles de la aplicación. |
-| Conexiones no se recuperan | Conserva la base y la clave original. Si no existe una clave recuperable, las cuentas deberán autorizarse de nuevo. |
 
 ## Verificar el empaquetado
 
@@ -217,7 +193,7 @@ La construcción y la suite Docker completa terminaron con código `0` en Linux 
 | Comprobación | Resultado observado |
 | --- | --- |
 | Imagen y contexto | Auditoría de la imagen y lista permitida; los canarios sintéticos privados quedaron fuera del contexto de construcción. |
-| Recorrido por usuario | Dos cuentas, captura de Memos, MCP con Bearer y SSE, con separación del trabajo entre identidades. |
+| Recorrido por usuario | Dos cuentas, pares enviados por MCP con Bearer y SSE, con separación del trabajo entre identidades. |
 | Continuidad | Reiniciar y recrear el contenedor conserva trabajo, procedencia y credencial cifrada en los volúmenes. |
 | Terminación | `SIGTERM` termina con código `0` y cierra un SSE abierto. |
 | Rechazos | Permisos o propietario incorrectos y una segunda instancia sobre la misma SQLite se rechazan. |

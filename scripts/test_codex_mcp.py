@@ -47,7 +47,7 @@ def connect(resources, env, name):
     inventory = client.request("mcpServerStatus/list", {"threadId": thread_id, "serverName": SERVER, "detail": "toolsAndAuthOnly"})
     servers = [server for server in inventory["data"] if server["name"] == SERVER]
     check(len(servers) == 1 and servers[0]["authStatus"] == "oAuth", "Real Codex did not authenticate its hosted MCP server.")
-    check(set(servers[0]["tools"]) == {"get_current_work", "submit_proposal"}, "Real Codex discovered an incorrect hosted tool inventory.")
+    check(set(servers[0]["tools"]) == {"get_current_work", "submit_comparison", "submit_proposal"}, "Real Codex discovered an incorrect hosted tool inventory.")
     return client, thread_id
 
 
@@ -61,28 +61,28 @@ def main():
             for name in ("alice", "bob"):
                 browser = TlsBrowser(env.base, env.runtime["issuer"], env.trust)
                 browser.login(env.runtime["users"][name])
-                original = seed(env, browser, f"# Original privado de {name}\r\n\r\nConservar 🌳 y 日本語.\r\n")
-                streams.append(Events(browser, 1))
+                original = {"label": "previo.md", "markdown": f"# Original privado de {name}\r\n\r\nConservar 🌳 y 日本語.\r\n"}
+                streams.append(Events(browser, 0))
                 sessions.append({"name": name, "browser": browser, "original": original})
             for session in sessions:
                 phase = "real Codex OAuth over HTTPS"
                 client, thread_id = connect(resources, env, session["name"])
                 session.update({"client": client, "thread_id": thread_id})
                 work = current(client, thread_id)
-                check(work == {"revision": 1, "base": session["original"], "candidate": None, "viewer_url": env.base + "/"},
+                check(work == {"revision": 0, "base": None, "candidate": None, "viewer_url": env.base + "/"},
                       "Real Codex read another account's work or returned an insecure viewer URL.")
             phase = "real Codex proposals, browser SSE and account isolation"
             for index, session in enumerate(sessions):
                 proposal = {"label": "Propuesta de IA.md", "markdown": f"# Propuesta privada de {session['name']}\r\n\r\nCambio 🌲.\r\n"}
                 session["proposal"] = proposal
-                result = call(session["client"], session["thread_id"], "submit_proposal", {"expected_revision": 1, "candidate": proposal})
+                result = call(session["client"], session["thread_id"], "submit_comparison", {"expected_revision": 0, "base": session["original"], "candidate": proposal})
                 summary = result.get("structuredContent", {})
-                check(not result.get("isError") and summary.get("revision") == 2 and summary.get("viewer_url") == env.base + "/",
+                check(not result.get("isError") and summary.get("revision") == 1 and summary.get("viewer_url") == env.base + "/",
                       "Real Codex did not commit its proposal with an HTTPS viewer URL.")
-                streams[index].revision(2)
+                streams[index].revision(1)
                 streams[1 - index].unchanged()
             for index, session in enumerate(sessions):
-                expected = {"revision": 2, "base": session["original"], "candidate": session["proposal"]}
+                expected = {"revision": 1, "base": session["original"], "candidate": session["proposal"]}
                 codex_work = current(session["client"], session["thread_id"])
                 check({key: codex_work[key] for key in expected} == expected, "Real Codex changed the original or crossed an account boundary.")
                 status, raw, _ = http(env, "/api/work", opener=session["browser"].opener)
@@ -90,11 +90,11 @@ def main():
                 status, raw, _ = http(env, "/api/work", access=token(env, session["name"]))
                 check(status == 200 and json.loads(raw) == expected, "The API cannot see the exact Codex proposal.")
                 snapshot = json.loads(http(env, "/api/state", opener=session["browser"].opener)[1])
-                check(snapshot["revision"] == 2 and not snapshot["comparison"]["source_equal"] and snapshot["comparison"]["rows"], "The viewer did not render the Codex comparison.")
-                stale = call(session["client"], session["thread_id"], "submit_proposal", {"expected_revision": 1, "candidate": session["proposal"]})
+                check(snapshot["revision"] == 1 and not snapshot["comparison"]["source_equal"] and snapshot["comparison"]["rows"], "The viewer did not render the Codex comparison.")
+                stale = call(session["client"], session["thread_id"], "submit_comparison", {"expected_revision": 0, "base": session["original"], "candidate": session["proposal"]})
                 check(stale.get("isError") and stale["structuredContent"]["status"] == 409, "Real Codex overwrote a newer revision.")
                 streams[index].unchanged()
-        print("Real Codex MCP: verified resource HTTPS/custom CA, OAuth PKCE, two private accounts, proposal/SSE/viewer agreement and stale-write rejection passed; model turns: 0.")
+        print("Real Codex MCP: verified resource HTTPS/custom CA, OAuth PKCE, two private accounts, atomic document pairs/SSE/viewer agreement and stale-write rejection passed; model turns: 0.")
     except (CheckFailed, ProbeError) as error:
         raise SystemExit(f"Real Codex MCP failed during {phase}: {error}") from None
     except Exception:

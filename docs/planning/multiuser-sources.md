@@ -1,5 +1,7 @@
 # Beta alojada: cuentas y orígenes
 
+Alcance vigente desde 2026-11-05: se retiran todos los conectores y el agente envía ambos documentos. Consulta [la decisión y su contrato](agent-comparisons.md). Los apartados fechados anteriores conservan evidencia histórica; no describen conectores vigentes.
+
 Fecha original: 2026-10-27. Estado de código y despliegue: 2026-10-29. Rama: `feature/multiuser-sources`.
 
 Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
@@ -34,7 +36,7 @@ La aplicación usa Jira y Memos como orígenes. No publica ni actualiza document
 4. Recibir una propuesta y comparar automáticamente, con procedencia y momento de lectura visibles.
 5. Sustituir o borrar el trabajo, y desconectar las cuentas externas de forma independiente.
 
-Para la beta se propone Jira **descripción del issue**, con título y referencia como metadatos, y Memos **contenido de la nota**. No se incluyen comentarios, adjuntos, búsqueda avanzada ni exploradores completos. Este recorte conserva el alcance del comité. [S08](memos-source.md) implementa la captura de Memos y [S09](jira-source.md), la descripción de Jira con conversión ADF acotada; una prueba sintética no equivale a autorizar una cuenta real del proveedor.
+Para la beta se propone Jira **descripción del issue**, con título y referencia como metadatos, y Memos **contenido de la nota**. No se incluyen comentarios, adjuntos, búsqueda avanzada ni exploradores completos. Este recorte conserva el alcance del comité. [S08](agent-comparisons.md) implementa la captura de Memos y [S09](agent-comparisons.md), la descripción de Jira con conversión ADF acotada; una prueba sintética no equivale a autorizar una cuenta real del proveedor.
 
 La base se captura cuando se lee el origen. No cambia silenciosamente durante la revisión. Actualizar el origen será una acción explícita, con protección contra resultados obsoletos. Un fallo de red, de permisos, de conversión o de análisis conserva el trabajo válido anterior.
 
@@ -179,13 +181,13 @@ La épica y sus historias se publican en GitHub. Cada historia contiene tareas, 
 
 ### Avance histórico al 2026-10-28
 
-Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](personal-connections.md) y [S08: captura de Memos](memos-source.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. [S14](beta-operations.md) incorpora el despliegue real por invitación, restauración de trabajo/IdP/claves, reinicio y rollback; también se verificó Codex por HTTPS público con dos usuarios sintéticos. Google/GitHub y la lectura de Jira conservan sus historias pendientes.
+Avance al 2026-10-28: S02, S04, S05, [S06: agentes remotos](remote-agents.md), [S07: conexiones personales](agent-comparisons.md) y [S08: captura de Memos](agent-comparisons.md) están implementados. Memos puede abrirse por ID o URL como original, conservando el Markdown y su procedencia; la lectura de Jira sigue en S09. [S12: empaquetado](container-deployment.md) incorpora el contenedor verificado en Linux arm64 y en CI Linux amd64. [S13: aislamiento y capacidad](capacity-validation.md) añade cuotas, límites de complejidad, prueba de diez sesiones y recuperación con proveedores sintéticos; no certifica el cluster ni las funciones pendientes. S01 y S03 mantienen pendiente Google/GitHub; Keycloak y Codex se verificaron con usuarios sintéticos. [S14](beta-operations.md) incorpora el despliegue real por invitación, restauración de trabajo/IdP/claves, reinicio y rollback; también se verificó Codex por HTTPS público con dos usuarios sintéticos. Google/GitHub y la lectura de Jira conservan sus historias pendientes.
 
 ### Avance histórico · 2026-10-29
 
-El código de [S09: Jira Cloud](jira-source.md) obtiene únicamente descripción, título y fecha del issue permitido por la conexión personal. `adf-md-v1` convierte el contenido admitido y conserva datos no representables con avisos explícitos; no se cargan comentarios/adjuntos ni se escriben cambios de negocio.
+El código de [S09: Jira Cloud](agent-comparisons.md) obtiene únicamente descripción, título y fecha del issue permitido por la conexión personal. `adf-md-v1` convierte el contenido admitido y conserva datos no representables con avisos explícitos; no se cargan comentarios/adjuntos ni se escriben cambios de negocio.
 
-[S10: selector y procedencia](source-picker.md) integra en las cabeceras texto, archivo, Jira/Memos y entrega del agente. Guarda la captura, muestra referencia, fechas y avisos y ofrece actualización explícita con revisión esperada. La propuesta y los metadatos del lado no editado se conservan. El esquema 4 persiste el tipo y momento de recepción de entradas manuales, API y MCP.
+[S10: selector y procedencia](agent-comparisons.md) integra en las cabeceras texto, archivo, Jira/Memos y entrega del agente. Guarda la captura, muestra referencia, fechas y avisos y ofrece actualización explícita con revisión esperada. La propuesta y los metadatos del lado no editado se conservan. El esquema 4 persiste el tipo y momento de recepción de entradas manuales, API y MCP.
 
 [S11: coordinación](coordination.md) vincula lecturas y SSE a la sesión de cada pestaña y mantiene CAS en el commit. Las pruebas incluyen reconexión, revocación, servidor reiniciado, lecturas lentas y propuestas concurrentes; sus resultados actuales se registran en esa guía. No se añade un sistema distribuido ni colaboración entre usuarios.
 
@@ -217,4 +219,4 @@ El plan original se contrastó en dos rondas entre tres agentes mediante lectura
 
 ## Validación Jira del 2026-11-04
 
-La prueba OAuth y lectura Jira con la cuenta propietaria de la app pasó, incluida propuesta por Codex/MCP, preservación del original y su procedencia, aislamiento y conflicto de revisión. Se retiraron los datos, credencial y cuentas de prueba sin modificar el trabajo del propietario. [Evidencia y alcance](jira-source.md#validación-real-y-distribución). Sharing sigue deshabilitado; #17 no se considera terminado. Los apartados fechados en octubre conservan sus resultados históricos.
+La prueba OAuth y lectura Jira con la cuenta propietaria de la app pasó, incluida propuesta por Codex/MCP, preservación del original y su procedencia, aislamiento y conflicto de revisión. Se retiraron los datos, credencial y cuentas de prueba sin modificar el trabajo del propietario. [Evidencia y alcance](agent-comparisons.md). Sharing sigue deshabilitado; #17 no se considera terminado. Los apartados fechados en octubre conservan sus resultados históricos.

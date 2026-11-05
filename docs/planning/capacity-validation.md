@@ -1,5 +1,7 @@
 # S13: aislamiento, cuotas y diez usuarios
 
+Alcance vigente desde 2026-11-05: se retiran todos los conectores y el agente envía ambos documentos. Consulta [la decisión y su contrato](agent-comparisons.md). Los apartados fechados anteriores conservan evidencia histórica; no describen conectores vigentes.
+
 Fecha: 2026-10-28. Issue: [#14](https://github.com/joalceco/mddiff/issues/14). Rama: `feature/multiuser-sources`.
 
 Esta verificación cubre el servicio implementado: trabajo manual o capturado desde Memos, propuestas API/MCP y eventos privados. Utiliza identidades y documentos sintéticos. El resultado no autoriza por sí solo la publicación: Jira como original, el selector general y la coordinación completa continúan en sus historias; el despliegue y la recuperación operativa pertenecen a [S14](https://github.com/joalceco/mddiff/issues/15). Google/GitHub sigue pendiente.

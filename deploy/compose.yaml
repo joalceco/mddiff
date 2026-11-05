@@ -28,15 +28,3 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      - type: bind
-        source: ${MDDIFF_SECRETS_DIR:-/srv/mddiff/secrets}/connections.json
-        target: /run/secrets/mddiff/connections.json
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${MDDIFF_SECRETS_DIR:-/srv/mddiff/secrets}/connections.key
-        target: /run/secrets/mddiff/connections.key
-        read_only: true
-        bind:
-          create_host_path: false

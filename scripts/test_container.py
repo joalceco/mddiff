@@ -94,7 +94,7 @@ def scan_image(image, identity, secrets):
                     continue
                 path = Path(member.name)
                 check(not ({".git", "target", ".codex"} & set(path.parts)) and path.suffix != ".rs"
-                      and path.name not in {"Cargo.toml", "Cargo.lock", "oidc.json", "connections.json", "connections.key", "runtime.json"}
+                      and path.name not in {"Cargo.toml", "Cargo.lock", "oidc.json", "runtime.json"}
                       and not path.name.startswith(".env"), "The runtime image contains source, build output or private configuration.")
                 found_binary |= member.name.lstrip("/") == "usr/local/bin/mddiff"
                 tail = b""
@@ -151,7 +151,7 @@ def audit_compose():
         check(all(Decimal(str(service[field])) == expected for field, expected in
                   (("pids_limit", 128), ("mem_limit", 512 * 1024 * 1024), ("memswap_limit", 512 * 1024 * 1024), ("cpus", 1))), "Compose lost its process, memory, swap or CPU limits.")
         mounts = {item["target"]: item for item in service["volumes"]}
-        targets = {"/var/lib/mddiff", *("/run/secrets/mddiff/" + name for name in ("oidc.json", "connections.json", "connections.key"))}
+        targets = {"/var/lib/mddiff", *("/run/secrets/mddiff/" + name for name in ("oidc.json",))}
         check(set(mounts) == targets and len(service["volumes"]) == len(targets)
               and all(item["type"] == "bind" and item.get("bind", {}).get("create_host_path") is False for item in mounts.values())
               and not mounts["/var/lib/mddiff"].get("read_only", False)
@@ -231,7 +231,7 @@ def main():
                     "--mount", "type=volume,src=" + mapping[data][0] + ",dst=/var/lib/mddiff,volume-nocopy",
                     "--mount", "type=volume,src=" + mapping[configuration][0] + ",dst=/run/secrets/mddiff,readonly,volume-nocopy",
                     tested_image, "--mode", "hosted", "--bind", "0.0.0.0", "--port", str(port), "--data-dir", "/var/lib/mddiff",
-                    "--oidc-config", "/run/secrets/mddiff/oidc.json", "--connections-config", "/run/secrets/mddiff/connections.json"]
+                    "--oidc-config", "/run/secrets/mddiff/oidc.json"]
                 docker(*command); containers.append(name)
                 info = json.loads(docker("inspect", name).stdout)[0]
                 host = info["HostConfig"]
@@ -329,7 +329,7 @@ def main():
             stop(app)
             client.send({"phase": "quit"}); client.receive("closed")
             check(client.process.wait(timeout=15) == 0, "The client did not restore its temporary synthetic OAuth configuration.")
-        print("Container integration passed: verified loopback HTTPS, two private accounts/MCP/SSE, encrypted durable volumes, clean SIGTERM, one SQLite writer and closed permission failures.")
+        print("Container integration passed: verified loopback HTTPS, two private accounts/MCP/SSE, private durable volumes, clean SIGTERM, one SQLite writer and closed permission failures.")
     except CheckFailed as error:
         raise SystemExit("Container integration failed during " + phase + ": " + str(error)) from None
     except Exception as error:
@@ -338,6 +338,15 @@ def main():
         def owned_container(name):
             found = docker("inspect", name, required=False)
             return found.returncode == 0 and json.loads(found.stdout)[0]["Config"].get("Labels", {}).get(LABEL) == identity
+        if arguments.capacity and "app" in locals() and owned_container(app) and "report" in locals():
+            state = json.loads(docker("inspect", app).stdout)[0]["State"]
+            report["terminal_container_state"] = {key: state[key] for key in ("Running", "OOMKilled", "ExitCode")}
+            identity_state = json.loads(docker("inspect", fixture.NAME).stdout)[0]["State"]
+            report["terminal_identity_state"] = {key: identity_state[key] for key in ("Running", "OOMKilled", "ExitCode")}
+            if report.get("status") == "running":
+                report["status"] = "failed"
+                report["failed_phase"] = phase
+            fixture.private_write(output, json.dumps(report, indent=2) + "\n")
         for name in reversed(containers):
             if name.endswith("-client") or not owned_container(name):
                 continue

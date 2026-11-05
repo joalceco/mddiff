@@ -1,5 +1,7 @@
 # S14: operar la beta por invitación
 
+Alcance vigente desde 2026-11-05: se retiran todos los conectores y el agente envía ambos documentos. Consulta [la decisión y su contrato](agent-comparisons.md). Los apartados fechados anteriores conservan evidencia histórica; no describen conectores vigentes.
+
 Issue: [#15](https://github.com/joalceco/mddiff/issues/15). Rama: `feature/multiuser-sources`.
 
 Esta guía describe la operación de una instancia alojada y sus límites. El runbook de la instalación, sus dominios, direcciones, accesos y archivos privados se conservan fuera del repositorio. Los comandos de las guías públicas utilizan ejemplos; no constituyen un instalador del cluster.
@@ -20,7 +22,7 @@ Para admitir a una persona:
 4. Comprueba el cambio de contraseña y que el espacio nuevo esté vacío.
 5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE.
 
-Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. En la instalación del 2026-10-28, la lectura de Jira y Google/GitHub conservaron sus historias pendientes. [S09](jira-source.md) registra el avance posterior de Jira; Google/GitHub sigue pendiente.
+Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. En la instalación del 2026-10-28, la lectura de Jira y Google/GitHub conservaron sus historias pendientes. [S09](agent-comparisons.md) registra el avance posterior de Jira; Google/GitHub sigue pendiente.
 
 Al 2026-10-29, Jira aún no tiene una lectura real verificada: falta configurar un secreto OAuth válido del operador. La cuenta propietaria puede probar la aplicación privada; autorizar otras cuentas requiere **Sharing**, que permanece deshabilitado por [#17](https://github.com/joalceco/mddiff/issues/17). La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. No se ha emitido esa atestación ni se considera resuelto el requisito mediante este runbook.
 
@@ -112,4 +114,4 @@ El primer ciclo manual verificó ocho checkpoints mediante recuperación protegi
 
 Sobre la imagen publicada, dos identidades nuevas completaron login y Codex OAuth/MCP por HTTPS, lectura del trabajo, propuestas privadas, SSE y rechazo de revisión obsoleta; una tercera sin invitación recibió rechazo. Pasaron también las sondas de salud, autenticación y administración. No se usaron turnos de modelo. Se borró el trabajo sintético mediante la API y se retiraron únicamente esas tres identidades.
 
-El timer de privacidad sigue sin instalar: habilitar futuras eliminaciones sin confirmación por caso requiere autorización separada. La recuperación protegida de checkpoints no sustituye la restauración completa en frío del respaldo nuevo, todavía pendiente. Sharing continúa deshabilitado. Consulta [el alcance actual y los pendientes](jira-privacy.md#activación-productiva-del-2026-11-05).
+El timer de privacidad sigue sin instalar: habilitar futuras eliminaciones sin confirmación por caso requiere autorización separada. La recuperación protegida de checkpoints no sustituye la restauración completa en frío del respaldo nuevo, todavía pendiente. Sharing continúa deshabilitado. Consulta [el alcance actual y los pendientes](agent-comparisons.md).

@@ -25,4 +25,4 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=20s --timeout=4s --start-period=30s --retries=3 \
     CMD curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:3847/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/mddiff"]
-CMD ["--mode", "hosted", "--bind", "0.0.0.0", "--port", "3847", "--data-dir", "/var/lib/mddiff", "--oidc-config", "/run/secrets/mddiff/oidc.json", "--connections-config", "/run/secrets/mddiff/connections.json"]
+CMD ["--mode", "hosted", "--bind", "0.0.0.0", "--port", "3847", "--data-dir", "/var/lib/mddiff", "--oidc-config", "/run/secrets/mddiff/oidc.json"]
