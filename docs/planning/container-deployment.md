@@ -26,6 +26,8 @@ Compose usa `restart: unless-stopped`, `init: true` y 15 segundos de margen de p
 
 Si el proxy se ejecuta en el host, el override [`deploy/compose.loopback.yaml`](../../deploy/compose.loopback.yaml) publica únicamente `127.0.0.1:3847`. No uses una publicación en todas las interfaces ni el modo de red del host para simplificar esa conexión. Las opciones de usuario, montajes, salud y protección del servicio se describen en la [referencia de servicios Compose](https://docs.docker.com/reference/compose-file/services/).
 
+El overlay opcional [`deploy/compose.privacy.yaml`](../../deploy/compose.privacy.yaml) requiere dos directorios adicionales: `MDDIFF_PRIVACY_DIR`, con el registro externo de decisiones en solo lectura, y `MDDIFF_CHECKPOINT_DIR`, para una copia temporal de SQLite en lectura/escritura. Ambos requieren `0700` y el propietario del servicio; el registro requiere `0600`. Mantén las carpetas separadas de los datos y entre sí. Ajusta los UID/GID del host si existen user namespaces. El checkpoint se solicita mediante señal al proceso, conserva las sesiones y contiene información privada de todas las identidades. Sigue el [contrato de captura y consumo](jira-privacy.md#checkpoint-del-operador-sin-reiniciar) antes de activar este overlay; el ciclo completo de privacidad todavía no está publicado en la beta.
+
 ## Preparar datos y archivos privados en Linux
 
 Necesitas Docker Engine con Compose, OpenSSL y un IdP Keycloak operativo con HTTPS. Este paquete no inicia Keycloak en modo `start-dev` ni crea cuentas reales. La fixture de `spikes/identity/` se utiliza únicamente en pruebas.

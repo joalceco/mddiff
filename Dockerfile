@@ -17,6 +17,7 @@ RUN apt-get update \
     && install -d -m 0755 /run/secrets/mddiff
 COPY --from=build /out/mddiff /usr/local/bin/mddiff
 LABEL org.opencontainers.image.source="https://github.com/joalceco/mddiff"
+LABEL io.mddiff.operator-checkpoint="1"
 USER 10001:10001
 WORKDIR /var/lib/mddiff
 EXPOSE 3847

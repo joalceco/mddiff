@@ -513,6 +513,7 @@ struct Arguments {
     oidc_config: Option<PathBuf>,
     connections_config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    operator_checkpoint_dir: Option<PathBuf>,
     jira_privacy_file: Option<PathBuf>,
     apply_jira_privacy: bool,
     bind: Ipv4Addr,
@@ -530,6 +531,7 @@ fn parse_arguments(
         oidc_config: None,
         connections_config: None,
         data_dir: None,
+        operator_checkpoint_dir: None,
         jira_privacy_file: None,
         apply_jira_privacy: false,
         bind: Ipv4Addr::LOCALHOST,
@@ -567,6 +569,14 @@ fn parse_arguments(
                     arguments
                         .next()
                         .ok_or("Falta el archivo después de --connections-config.")?
+                        .into(),
+                );
+            }
+            Some("--operator-checkpoint-dir") => {
+                options.operator_checkpoint_dir = Some(
+                    arguments
+                        .next()
+                        .ok_or("Falta la carpeta después de --operator-checkpoint-dir.")?
                         .into(),
                 );
             }
@@ -621,6 +631,11 @@ fn parse_arguments(
     if options.jira_privacy_file.is_some() && options.mode != CliMode::Hosted {
         return Err("--jira-privacy-file requiere modo hosted.".into());
     }
+    if options.operator_checkpoint_dir.is_some()
+        && (options.mode != CliMode::Hosted || !cfg!(unix) || options.apply_jira_privacy)
+    {
+        return Err("--operator-checkpoint-dir requiere un servidor hosted en Unix.".into());
+    }
     if options.apply_jira_privacy
         && (options.jira_privacy_file.is_none()
             || options.oidc_config.is_some()
@@ -671,7 +686,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(arguments) = parse_arguments(env::args_os().skip(1)).map_err(std::io::Error::other)?
     else {
         println!(
-            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [--jira-privacy-file ARCHIVO] [original.md propuesta.md]\nAplicación sin servidor: mddiff --mode hosted --data-dir CARPETA --jira-privacy-file ARCHIVO --apply-jira-privacy\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
+            "Uso: mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--oidc-config ARCHIVO] [--data-dir CARPETA] [--connections-config ARCHIVO] [--jira-privacy-file ARCHIVO] [original.md propuesta.md]\nAplicación sin servidor: mddiff --mode hosted --data-dir CARPETA --jira-privacy-file ARCHIVO --apply-jira-privacy\nCheckpoint del operador: añadir --operator-checkpoint-dir CARPETA al servidor hosted en Unix; SIGUSR1 crea work.sqlite3 sin reemplazar una copia existente.\n\nServidor local de lectura y comparación de Markdown. Dirección predeterminada: 127.0.0.1. Puerto predeterminado: 3847. Modo predeterminado: local.\nEl modo hosted requiere --data-dir para el trabajo persistente y --oidc-config para autenticar. Sin OIDC, el acceso queda cerrado. Escuchar en una IPv4 privada o 0.0.0.0 requiere hosted con OIDC."
         );
         return Ok(());
     };
@@ -702,6 +717,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => Workspaces::persistent(arguments.data_dir.as_deref().unwrap())?,
         }),
+    };
+    let checkpoint_directory = match (&arguments.operator_checkpoint_dir, &mode) {
+        (Some(directory), Mode::Hosted(workspaces)) => {
+            Some(workspaces.checkpoint_directory(directory)?)
+        }
+        _ => None,
+    };
+    #[cfg(unix)]
+    let checkpoint_signal = if checkpoint_directory.is_some() {
+        Some(tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::user_defined1(),
+        )?)
+    } else {
+        None
     };
     let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();
@@ -748,10 +777,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     }
+    let checkpoints = async {
+        #[cfg(unix)]
+        if let (Some(directory), Some(mut signal)) = (checkpoint_directory, checkpoint_signal) {
+            while signal.recv().await.is_some() {
+                if let Mode::Hosted(workspaces) = &app.mode {
+                    eprintln!(
+                        "{}",
+                        if workspaces.checkpoint(directory.clone()).await.is_ok() {
+                            "OPERATOR_CHECKPOINT_READY"
+                        } else {
+                            "OPERATOR_CHECKPOINT_FAILED"
+                        }
+                    );
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = checkpoint_directory;
+        std::future::pending::<()>().await;
+    };
     // Open SSE streams must not block shutdown; SQLite recovers incomplete transactions.
     tokio::select! {
-        result = async { axum::serve(listener, router(app)).await } => result?,
+        result = async { axum::serve(listener, router(Arc::clone(&app))).await } => result?,
         result = shutdown_signal() => result?,
+        _ = checkpoints => {},
     }
     Ok(())
 }
@@ -1010,6 +1060,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cli_limits_operator_checkpoints_to_unix_hosted_servers() {
+        let arguments = [
+            "--mode",
+            "hosted",
+            "--data-dir",
+            "data",
+            "--operator-checkpoint-dir",
+            "operator",
+        ];
+        let result = parse_arguments(arguments.map(OsString::from));
+        if cfg!(unix) {
+            assert_eq!(
+                result.unwrap().unwrap().operator_checkpoint_dir,
+                Some(PathBuf::from("operator"))
+            );
+        } else {
+            assert!(result.is_err());
+        }
+        assert!(parse_arguments(["--operator-checkpoint-dir"].map(OsString::from)).is_err());
+        assert!(
+            parse_arguments(["--operator-checkpoint-dir", "operator"].map(OsString::from)).is_err()
+        );
+        assert!(
+            parse_arguments(
+                [
+                    "--mode",
+                    "hosted",
+                    "--data-dir",
+                    "data",
+                    "--jira-privacy-file",
+                    "journal.json",
+                    "--apply-jira-privacy",
+                    "--operator-checkpoint-dir",
+                    "operator"
+                ]
+                .map(OsString::from)
+            )
+            .is_err()
+        );
     }
 
     #[test]

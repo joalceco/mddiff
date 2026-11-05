@@ -107,11 +107,14 @@ class Events:
 
 
 @contextmanager
-def instance(binary, base, config_path, data_dir):
+def instance(binary, base, config_path, data_dir, checkpoint_dir=None):
     streams = []
+    command = [str(binary), "--mode", "hosted", "--port", str(urlsplit(base).port),
+               "--oidc-config", str(config_path), "--data-dir", str(data_dir)]
+    if checkpoint_dir is not None:
+        command += ["--operator-checkpoint-dir", str(checkpoint_dir)]
     process = subprocess.Popen(
-        [str(binary), "--mode", "hosted", "--port", str(urlsplit(base).port),
-         "--oidc-config", str(config_path), "--data-dir", str(data_dir)],
+        command,
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -179,6 +182,13 @@ def inspect_database(path, runtime, expected):
             check(records.get((runtime["issuer"], runtime["users"][name]["id"])) == wanted, "SQLite does not contain only the owner's latest committed work.")
 
 
+def checkpoint_signal(process, expected):
+    process.send_signal(signal.SIGUSR1)
+    check(bool(select.select([process.stderr], [], [], 10)[0]), "Operator checkpoint did not acknowledge the signal.")
+    check(process.stderr.readline().strip() == expected, "Unexpected operator checkpoint acknowledgement.")
+    check(process.poll() is None, "Operator checkpoint stopped the reader.")
+
+
 def main():
     phase = "setup"
     try:
@@ -200,6 +210,9 @@ def main():
             data_dir = Path(directory) / "data"
             data_dir.mkdir(mode=0o700)
             database = data_dir / "work.sqlite3"
+            checkpoint_dir = Path(directory) / "operator"
+            checkpoint_dir.mkdir(mode=0o700)
+            checkpoint = checkpoint_dir / "work.sqlite3"
             witness = Path(directory) / "not-opened.md"
             witness_bytes = b"# SYNTHETIC_WITNESS_MUST_NOT_BE_OPENED_BY_LABEL\n"
             witness.write_bytes(witness_bytes)
@@ -212,7 +225,7 @@ def main():
             bob_work = {"revision": 1, "base": bob_base, "candidate": proposal}
 
             phase = "per-owner APIs, validation and relogin"
-            with instance(binary, base, config_path, data_dir) as (process, streams):
+            with instance(binary, base, config_path, data_dir, checkpoint_dir) as (process, streams):
                 alice, bob = login(runtime, base)
                 verify(alice, empty)
                 verify(bob, empty)
@@ -226,6 +239,20 @@ def main():
                 bob_events.revision(1)
                 alice_events.unchanged()
                 verify(bob, bob_work)
+
+                checkpoint_signal(process, "OPERATOR_CHECKPOINT_READY")
+                first_alice = {"revision": 1, "base": first, "candidate": proposal}
+                inspect_database(checkpoint, runtime, {"alice": first_alice, "bob": bob_work})
+                check(checkpoint.stat().st_mode & 0o777 == 0o600 and checkpoint.stat().st_nlink == 1,
+                      "Checkpoint is not a private single-link file.")
+                checkpoint_bytes = checkpoint.read_bytes()
+                verify(alice, first_alice)
+                verify(bob, bob_work)
+                alice_events.unchanged()
+                bob_events.unchanged()
+                checkpoint_signal(process, "OPERATOR_CHECKPOINT_FAILED")
+                check(checkpoint.read_bytes() == checkpoint_bytes, "A second signal overwrote an existing checkpoint.")
+                print("Hosted persistence: live operator checkpoint preserves both sessions, SSE, revisions and the previous copy.")
 
                 valid = {"expected_revision": 1, "base": first, "candidate": proposal}
                 rejected(alice, alice_events, "PUT", {**valid, "expected_revision": 0}, 409)
@@ -254,6 +281,7 @@ def main():
                 bob_events.unchanged()
                 verify(alice, alice_work)
                 verify(bob, bob_work)
+                inspect_database(checkpoint, runtime, {"alice": first_alice, "bob": bob_work})
                 check(alice.request("/auth/logout", {}, {"Origin": base, "X-CSRF-Token": csrf})[0] == 204, "Could not log out after persisting work.")
                 alice = Browser(base, runtime["issuer"])
                 alice.login(runtime["users"]["alice"])

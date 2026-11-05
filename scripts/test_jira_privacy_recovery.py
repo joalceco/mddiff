@@ -102,6 +102,28 @@ def main():
               "Compatible rollback skipped the latest erasure decision.")
         check(records(data) == original_live, "Preparing a rollback changed live data.")
         check(privacy.private_read(state)["pending"], "Recovery preparation acknowledged all retained copies.")
+        checkpoint_dir = root / "operator-checkpoint"
+        checkpoint_dir.mkdir(mode=0o700)
+        with_checkpoint = copy.deepcopy(live)
+        with_checkpoint["services"]["mddiff"]["command"] += ["--operator-checkpoint-dir", "/run/mddiff-checkpoint"]
+        with_checkpoint["services"]["mddiff"]["volumes"].append({
+            "type": "bind", "source": str(checkpoint_dir), "target": "/run/mddiff-checkpoint", "read_only": False})
+        capable = dict(current, checkpoint_protocol=1)
+        selected, config, _ = recovery.prepare(root, stage, saved, selected6, with_checkpoint, capable, native_apply)
+        check(selected["image_id"] == current["image_id"] and selected["checkpoint_protocol"] == 1
+              and config["services"]["mddiff"]["command"] == with_checkpoint["services"]["mddiff"]["command"],
+              "An older schema-6 image cannot start the new checkpoint command.")
+        selected, _, _ = recovery.prepare(root, stage, saved, dict(selected6, checkpoint_protocol=1),
+                                          with_checkpoint, capable, native_apply)
+        check(selected["image_id"] == old["image_id"], "A capable schema-6 checkpoint lost code rollback support.")
+        rejects(lambda: recovery.prepare(root, stage, saved, selected6, with_checkpoint, current, native_apply))
+        for invalid in (True, 2, "1"):
+            rejects(lambda: recovery.prepare(root, stage, saved, dict(selected6, checkpoint_protocol=invalid),
+                                             with_checkpoint, capable, native_apply))
+        readonly_checkpoint = copy.deepcopy(with_checkpoint)
+        readonly_checkpoint["services"]["mddiff"]["volumes"][-1]["read_only"] = True
+        rejects(lambda: recovery.prepare(root, stage, saved, selected6, readonly_checkpoint, capable, native_apply))
+        check(records(data) == original_live, "Checkpoint compatibility checks changed live data.")
         def changed_journal(image, data, journal):
             native_apply(image, data, journal)
             changed = privacy.private_read(journal)

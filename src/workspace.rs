@@ -229,6 +229,27 @@ impl Workspaces {
             })?
     }
 
+    pub fn checkpoint_directory(
+        &self,
+        directory: &std::path::Path,
+    ) -> Result<std::path::PathBuf, AppError> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::bad_request("El checkpoint requiere almacenamiento persistente.")
+            })?
+            .checkpoint_directory(directory)
+    }
+
+    pub async fn checkpoint(&self, directory: std::path::PathBuf) -> Result<(), AppError> {
+        let storage = self.storage.clone().ok_or_else(|| {
+            AppError::bad_request("El checkpoint requiere almacenamiento persistente.")
+        })?;
+        tokio::task::spawn_blocking(move || storage.checkpoint(&directory))
+            .await
+            .map_err(|_| AppError::internal("No se pudo crear el checkpoint del operador."))?
+    }
+
     pub fn connection_store(
         &self,
         key_path: &std::path::Path,
@@ -1741,6 +1762,132 @@ mod tests {
                 }),
             )
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoints_copy_private_state_without_stopping_or_changing_work() {
+        let (root, data, journal) = privacy_fixture();
+        let output = root.0.join("checkpoints");
+        std::fs::create_dir(&output).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+        for name in ["alice", "bob"] {
+            store
+                .for_user(&identity("issuer", name))
+                .await
+                .unwrap()
+                .update(Some(0), None, move || {
+                    Ok(Work {
+                        base: Some(document(name)),
+                        candidate: Some(document("proposal\r\n🦀")),
+                        jira_privacy: WorkPrivacy {
+                            base: personal_data("synthetic:private", 100),
+                            candidate: JiraData::default(),
+                        },
+                        ..Work::default()
+                    })
+                })
+                .await
+                .unwrap();
+        }
+        let alice = identity("issuer", "alice");
+        connect(&store, &alice, 0);
+        store.checkpoint(output.clone()).await.unwrap();
+        let checkpoint = output.join("work.sqlite3");
+        assert!(!output.join(".work.sqlite3.pending").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let info = std::fs::metadata(&checkpoint).unwrap();
+            assert_eq!(info.permissions().mode() & 0o777, 0o600);
+            assert_eq!(info.nlink(), 1);
+        }
+        let bytes = std::fs::read(&checkpoint).unwrap();
+        assert!(store.checkpoint(output.clone()).await.is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), bytes);
+        let live = store.for_user(&alice).await.unwrap();
+        live.propose_if_revision(1, document("later"))
+            .await
+            .unwrap();
+        store.check_storage().await.unwrap();
+        let recovered = Workspaces::persistent_with_barrier(&output, &journal).unwrap();
+        for name in ["alice", "bob"] {
+            let work = recovered
+                .for_user(&identity("issuer", name))
+                .await
+                .unwrap()
+                .work()
+                .await;
+            assert_eq!(work.revision, 1);
+            assert!(work.base == Some(document(name)));
+            assert!(work.candidate == Some(document("proposal\r\n🦀")));
+            assert_eq!(
+                work.jira_privacy.base,
+                personal_data("synthetic:private", 100)
+            );
+            assert!(
+                !serde_json::to_string(&work)
+                    .unwrap()
+                    .contains("synthetic:private")
+            );
+        }
+        let connection = recovered
+            .storage
+            .as_ref()
+            .unwrap()
+            .read_connection(&alice, "memos", "notes")
+            .unwrap();
+        assert_eq!(connection.generation, 1);
+        assert_eq!(connection.encrypted.unwrap().ciphertext, vec![0; 16]);
+        assert!(live.work().await.candidate == Some(document("later")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoints_reject_unsafe_destinations_and_changed_authority() {
+        let (root, data, journal) = privacy_fixture();
+        let store = Workspaces::persistent_with_barrier(&data, &journal).unwrap();
+        assert!(store.checkpoint_directory(&data).is_err());
+        assert!(store.checkpoint_directory(&data.join("nested")).is_err());
+        assert!(store.checkpoint_directory(&root.0.join("missing")).is_err());
+        assert!(
+            Workspaces::default()
+                .checkpoint(root.0.clone())
+                .await
+                .is_err()
+        );
+        let output = root.0.join("operator");
+        std::fs::create_dir(&output).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(store.checkpoint_directory(&output).is_err());
+            std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let link = root.0.join("operator-link");
+            symlink(&output, &link).unwrap();
+            assert!(store.checkpoint_directory(&link).is_err());
+            symlink(root.0.join("absent"), output.join("work.sqlite3")).unwrap();
+            assert!(store.checkpoint(output.clone()).await.is_err());
+            assert!(output.join("work.sqlite3").is_symlink());
+            std::fs::remove_file(output.join("work.sqlite3")).unwrap();
+        }
+        std::fs::create_dir(root.0.join(".git")).unwrap();
+        assert!(store.checkpoint_directory(&output).is_err());
+        std::fs::remove_dir(root.0.join(".git")).unwrap();
+        let pending = output.join(".work.sqlite3.pending");
+        std::fs::write(&pending, b"operator-owned").unwrap();
+        assert!(store.checkpoint(output.clone()).await.is_err());
+        assert_eq!(std::fs::read(&pending).unwrap(), b"operator-owned");
+        std::fs::remove_file(&pending).unwrap();
+        write_privacy_journal(&journal, 1, serde_json::json!({}));
+        assert!(store.checkpoint(output.clone()).await.is_err());
+        assert!(!pending.exists() && !output.join("work.sqlite3").exists());
     }
 
     #[tokio::test]

@@ -36,7 +36,7 @@ La migración 5→6 añade `privacy_guard`, una tabla de metadatos de operación
 
 ## Herramienta de reporte 3LO
 
-`scripts/jira_privacy_report.py` procesa checkpoints privados con el escritor detenido. `inventory` muestra únicamente cantidades; agrega la fecha más antigua de cada cuenta entre todos los originales, propuestas y checkpoints proporcionados. Deben incluirse la copia vigente y todas las copias retenidas. El comando no descubre snapshots restic ni demuestra que el operador haya incluido todos.
+`scripts/jira_privacy_report.py` procesa checkpoints privados sin un escritor sobre esas copias. La captura del proceso permite mantener abierto el lector, como se describe a continuación. `inventory` muestra únicamente cantidades; agrega la fecha más antigua de cada cuenta entre todos los originales, propuestas y checkpoints proporcionados. Deben incluirse la copia vigente y todas las copias retenidas. El comando no descubre snapshots restic ni demuestra que el operador haya incluido todos.
 
 `report` envía únicamente identificadores y fechas a `https://api.atlassian.com/app/report-accounts/`. Rechaza inventarios pendientes de clasificación. Obtiene el token de un JSON privado: conserva compatibilidad con el formato estático `{"access_token":"…"}` y admite la credencial renovable descrita a continuación. No acepta tokens como argumentos ni imprime identificadores. No utiliza proxies del entorno ni sigue redirecciones. El estado y su lock requieren una carpeta privada; las escrituras son atómicas, con permisos `0600` y sincronización a disco.
 
@@ -98,6 +98,18 @@ El reporte usó exclusivamente las dos [cuentas de prueba publicadas por Atlassi
 
 Esta prueba verifica autenticación, rotación y respuesta real del protocolo. **No reportó el inventario de producción, no aplicó borrados a documentos reales y no instaló el reporting periódico.** El estado de prueba permanece separado del futuro estado de operación. Sharing sigue desactivado.
 
+### Checkpoint del operador sin reiniciar
+
+Un servidor hosted sobre Unix admite `--operator-checkpoint-dir CARPETA`. La carpeta debe existir con `0700`, pertenecer al mismo propietario que los datos y quedar fuera de estos y de repositorios Git. La opción no se admite en local ni junto con `--apply-jira-privacy`. Sin la opción, el servidor no instala el receptor de `SIGUSR1` para esta función.
+
+Al recibir `SIGUSR1`, el proceso usa su conexión SQLite y su bloqueo de almacenamiento para crear una copia transaccional mediante [`VACUUM INTO`](https://www.sqlite.org/lang_vacuum.html). No modifica el trabajo, publica revisiones ni reinicia el proceso. Verifica la barrera antes y después de la captura, sincroniza la copia y la publica como `work.sqlite3` con `0600`, sin sobrescribir un archivo existente. Las sesiones y eventos continúan abiertos.
+
+Con la opción ya habilitada en el contenedor, el operador puede usar `docker compose kill -s SIGUSR1 mddiff`. Especifica siempre la señal: el valor predeterminado de [ese comando Docker](https://docs.docker.com/reference/cli/docker/compose/kill/) es `SIGKILL`. No envíes `SIGUSR1` a un binario que no tenga habilitado este receptor.
+
+El operador debe esperar `OPERATOR_CHECKPOINT_READY` en el log del proceso antes de consumir una captura nueva. `OPERATOR_CHECKPOINT_FAILED` indica que esa solicitud no quedó confirmada; la presencia de un archivo por sí sola no acredita éxito. Un checkpoint anterior, un destino inseguro o una barrera cambiada rechazan la solicitud sin reemplazar la copia anterior. Un archivo `.work.sqlite3.pending` tras una caída requiere inspección bajo el bloqueo del operador antes de retirarlo; no se debe tratar como una captura terminada.
+
+Esta copia contiene datos de **todas las identidades** y conexiones cifradas, sin copiar la clave externa ni los JSON de acceso. No hay endpoint HTTP/MCP ni control de la carpeta desde documentos o peticiones de usuario. Incluye el checkpoint en el inventario y en la política de retención mientras exista; retíralo después de consumirlo. La copia no sustituye un respaldo de claves, configuración o IdP, ni permite dar por cumplidas acciones pendientes sobre otras copias.
+
 ## Barrera externa y borrado
 
 `stage-erasure` requiere un único `--database` vigente, `--state` y `--journal`. Adquiere un bloqueo exclusivo de SQLite antes de publicar las decisiones; si el escritor está activo, falla sin cambiar el registro. Conserva las decisiones anteriores, no reduce su fecha y no convierte una cuenta cerrada en una simple actualización. Repetir la publicación de las mismas decisiones no cambia el archivo ni su generación.
@@ -130,13 +142,19 @@ Después de aplicar decisiones, el proceso trunca el WAL, ejecuta `VACUUM` y vue
 
 El overlay [`deploy/compose.privacy.yaml`](../../deploy/compose.privacy.yaml) monta un **directorio** privado externo en `/run/mddiff-privacy`, de solo lectura para la aplicación. El directorio, propiedad del UID del contenedor, requiere `0700` y el registro `0600`. La publicación conserva UID/GID y asigna al registro el propietario de su directorio antes del reemplazo, para que un job root no lo deje inaccesible al UID `10001`. Montar el directorio permite el reemplazo atómico; montar solo el archivo conservaría un inode anterior. `MDDIFF_PRIVACY_DIR` debe conservarse fuera de la restauración de documentos y secretos.
 
+El overlay también habilita el checkpoint operativo en `/run/mddiff-checkpoint`, con un montaje independiente de lectura/escritura desde `MDDIFF_CHECKPOINT_DIR`. Prepara esa carpeta como `10001:10001`, `0700`, separada de los datos y del registro de decisiones. El operador debe consumir la copia y esperar su confirmación sin reiniciar el servicio; este montaje temporal tampoco debe incorporarse sin control a un archivo de restauración.
+
+El 2026-11-05 se probó una autoridad alojada fuera del invitado, montada de solo lectura a través de LXC y Docker, con UID mapeado. La sustitución atómica fue visible en un contenedor ya abierto. El binario real aplicó un borrado a datos sintéticos y el preparador filtró un checkpoint anterior, conservó el trabajo del otro propietario y rechazó la autoridad ausente. El clon temporal y su disco se retiraron. El servicio publicado no cambió de binario, esquema ni configuración durante ese ensayo.
+
 El estado de reporting y la credencial del operador deben estar en **otro directorio privado**, fuera de ese montaje. El contenedor solo necesita leer el registro de decisiones, no el token del reporter.
 
 Una copia protegida de SQLite 6 se vuelve a filtrar al abrirla con el registro vigente. La prueba del binario real recupera un checkpoint previo al borrado y comprueba que no reaparecen los documentos ni aumenta otra vez la revisión tras repetir el proceso.
 
 [`scripts/jira_privacy_recovery.py`](../../scripts/jira_privacy_recovery.py) prepara una copia de recuperación antes de sustituir los datos en uso. Los helpers privados de recuperación completa y rollback de la aplicación usan el mismo preparador. Verifica el registro externo vigente y su montaje de directorio de solo lectura, filtra la copia con la CLI y comprueba esquema, integridad, generación y piso de revisión. Si el registro cambia durante el proceso, falla sin sustituir el estado en uso.
 
-Los checkpoints de esquema 3–5 se migran con la imagen compatible de esquema 6 ya instalada; su imagen y configuración antiguas no se vuelven a servir. Un checkpoint de esquema 6 puede seleccionar su propia imagen compatible, conservando el argumento y montaje de la barrera vigentes. Los documentos antiguos sin inventario suficiente siguen bloqueando la recuperación; no se descartan para hacerla pasar.
+Los checkpoints de esquema 3–5 se migran con la imagen compatible de esquema 6 ya instalada; su imagen y configuración antiguas no se vuelven a servir. Un checkpoint de esquema 6 puede seleccionar su propia imagen compatible, conservando el argumento y montaje de la barrera vigentes. Si el servicio usa el receptor de checkpoints, la imagen elegida también debe admitirlo: un checkpoint anterior sin esa capacidad conserva la imagen actual compatible en lugar de arrancar un binario que rechazaría la nueva opción. Una imagen anterior que sí admite el protocolo conserva el rollback de código. Los documentos antiguos sin inventario suficiente siguen bloqueando la recuperación; no se descartan para hacerla pasar.
+
+La imagen anuncia `io.mddiff.operator-checkpoint=1`; el operador valida esa etiqueta sobre la imagen inmutable y conserva `checkpoint_protocol: 1` en sus metadatos de recuperación. El preparador exige el protocolo actual y un montaje de checkpoint independiente de lectura/escritura cuando el argumento está habilitado. No debe inferirse esa capacidad únicamente del número de esquema SQLite. Los helpers de esa validación están preparados en esta entrega; el servicio publicado aún utiliza su cohorte anterior.
 
 El operador debe verificar el archivo de respaldo, la imagen y la compatibilidad de la identidad y la clave de conexiones **antes** de llamar al preparador. Los helpers privados conservan la configuración OAuth vigente y el código actual de recuperación, para que un respaldo antiguo no los reemplace. El registro permanece fuera de los directorios restaurados. En un host nuevo se requiere instalar primero una versión compatible y recuperar el registro autorizado por separado; la herramienta no inventa decisiones perdidas.
 
@@ -170,6 +188,8 @@ Las pruebas Rust cubren extracción bajo nodos desconocidos, identificadores amb
 Las pruebas del reporte cubren lotes, ciclos por cuenta, antigüedad agregada, reinicio tras éxito parcial, `429`, respuestas de actualización/borrado, interrupciones, respuestas inválidas, redirecciones, permisos y exclusión mutua. El [CI del reporte `27f2037`](https://github.com/joalceco/mddiff/actions/runs/41899586497) terminó con código y contenedor aprobados, incluida capacidad de diez usuarios sintéticos.
 
 Las pruebas de la barrera cubren varios propietarios, borrado de original o solo propuesta, actualización frente a captura posterior, conservación de conexiones, idempotencia, limpieza SQLite/WAL, rollback de la transacción ante inventario incompleto y rechazo de registro ausente, antiguo, enlazado, público o inválido. La CLI real valida publicación→borrado→recuperación filtrada; en la comprobación local también se ejecutó un binario anterior, que rechazó SQLite 6.
+
+Las pruebas del checkpoint cubren copia de todas las identidades, inventario privado y conexiones cifradas, contenido Unicode/CRLF, permisos, rechazo de destinos inseguros y conservación de una copia existente. La prueba de persistencia usa señales sobre el proceso real con dos usuarios Keycloak y comprueba que las sesiones, SSE y revisiones continúan. La prueba de contenedor verifica UID `10001`, `init`, raíz de solo lectura y confirmaciones de captura sin cambiar el PID. La recuperación distingue imágenes con y sin el protocolo, sin modificar el estado en uso ni confirmar acciones de otros respaldos.
 
 Las 13 pruebas de renovación cubren persistencia de tokens, recuperación de una respuesta perdida dentro del plazo, rechazo de intentos antiguos, límites de respuesta, permisos, locks y compatibilidad con credenciales estáticas. El [CI de `2e0943c`](https://github.com/joalceco/mddiff/actions/runs/42045971311) aprobó código y contenedor.
 

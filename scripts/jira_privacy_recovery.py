@@ -46,6 +46,11 @@ def prepare(root, stage, restored, manifest, live, current, apply=docker_apply):
         return manifest, restored, False
     require(current["sqlite_schema"] == 6 and manifest["sqlite_schema"] in (3, 4, 5, 6),
             "Protected recovery requires an installed trusted schema-6 release and the current external journal.")
+    for record in (current, manifest):
+        require("checkpoint_protocol" not in record
+                or type(record["checkpoint_protocol"]) is int and record["checkpoint_protocol"] == 1
+                and record["sqlite_schema"] == 6,
+                "Unsupported operator checkpoint protocol in release metadata.")
     rules = read_journal(journal, int(time.time()))
     app = live["services"]["mddiff"]
     require(app.get("image") == current["image_id"], "The trusted recovery image must be pinned in live configuration.")
@@ -59,6 +64,20 @@ def prepare(root, stage, restored, manifest, live, current, apply=docker_apply):
     require(len(mounts) == 1 and mounts[0].get("type") == "bind" and mounts[0].get("read_only") is True
             and Path(mounts[0].get("source", "")).absolute() == journal.parent.absolute(),
             "Live configuration must mount the current journal directory read-only.")
+    checkpoints = "--operator-checkpoint-dir" in arguments
+    if checkpoints:
+        position = arguments.index("--operator-checkpoint-dir")
+        require(current.get("checkpoint_protocol") == 1 and arguments.count("--operator-checkpoint-dir") == 1
+                and position + 1 < len(arguments) and Path(arguments[position + 1]).is_absolute(),
+                "Live checkpoint configuration requires a verified protocol-1 runtime and directory.")
+        destinations = [item for item in app.get("volumes", []) if isinstance(item, dict)
+                        and item.get("target") == arguments[position + 1]]
+        require(len(destinations) == 1 and destinations[0].get("type") == "bind"
+                and destinations[0].get("read_only", False) is False
+                and Path(destinations[0].get("source", "")).is_absolute()
+                and not Path(destinations[0]["source"]).resolve().is_relative_to((root / "data").resolve())
+                and Path(destinations[0]["source"]).resolve() != journal.parent.resolve(),
+                "The operator checkpoint needs a separate writable bind mount outside data and journal.")
     data = stage / "data"
     require(data.is_dir() and not data.is_symlink() and not stage.is_symlink()
             and not data.resolve().is_relative_to((root / "data").resolve()),
@@ -68,7 +87,8 @@ def prepare(root, stage, restored, manifest, live, current, apply=docker_apply):
         require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "Unexpected recovery data entry.")
     require((data / "work.sqlite3").is_file() and (data / "work.sqlite3").stat().st_nlink == 1,
             "Recovery requires a separate regular database checkpoint.")
-    selected = dict(current if manifest["sqlite_schema"] < 6 else manifest)
+    selected = dict(current if manifest["sqlite_schema"] < 6
+                    or checkpoints and manifest.get("checkpoint_protocol") != 1 else manifest)
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", selected["image_id"]) is not None,
             "Recovery requires an immutable compatible image ID.")
     config = copy.deepcopy(restored)

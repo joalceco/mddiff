@@ -102,6 +102,7 @@ mddiff [--mode local|hosted] [--root CARPETA] [--bind IPV4] [--port PUERTO] [--o
 | `--oidc-config ARCHIVO` | Sin configuración | JSON privado del proveedor Keycloak; solo se acepta en hosted. |
 | `--connections-config ARCHIVO` | Deshabilitadas | Destinos aprobados, cliente Jira y referencia a la clave externa de conexiones; requiere hosted y OIDC. |
 | `--data-dir CARPETA` | Sin directorio | Obligatorio en hosted para el trabajo actual persistente. No se acepta en local. |
+| `--operator-checkpoint-dir CARPETA` | Deshabilitado | En hosted sobre Unix, recibe una copia SQLite privada mediante `SIGUSR1`, sin reiniciar el lector. Solo para operación; consulta el [contrato del checkpoint](docs/planning/jira-privacy.md#checkpoint-del-operador-sin-reiniciar). |
 | `original.md propuesta.md` | Sin documentos | Abre una comparación inicial. Se aceptan dos rutas o ninguna. |
 | `--help`, `-h` | — | Muestra el uso y termina. |
 
@@ -124,6 +125,8 @@ Las cuentas requieren el rol `mddiff-user`; autenticar en el proveedor no conced
 Sin configuración OIDC, hosted solo puede arrancar cerrado en `127.0.0.1`: estado, trabajo y eventos rechazan el acceso con `401`, y salud devuelve `503`. Otra dirección exige OIDC configurado y debe ser una IPv4 privada o `0.0.0.0`. En hosted no se construye un lector de archivos ni se registran `POST /api/open` o `POST /api/compare`; la CLI rechaza `--root` y rutas posicionales. La interfaz admite texto pegado y archivos Markdown, sin abrir rutas del host. Con OIDC configurado, `/mcp` recibe propuestas mediante OAuth Bearer de usuario. Las conexiones personales a Jira/Memos pueden configurarse y sus notas o descripciones de issues pueden abrirse como original, sin escribir cambios en los proveedores.
 
 Cada persona obtiene su propio snapshot, bloqueo y canal de revisiones. Solo se conserva el último original y su propuesta, sin historial. Reiniciar recupera ese par y su revisión; las sesiones web siguen en memoria y requieren autenticarse otra vez. Google/GitHub sigue pendiente; la beta alojada utiliza cuentas por invitación. Consulta [el trabajo persistente](docs/planning/current-work.md), [la autenticación web](docs/planning/hosted-auth.md) y [el acceso de agentes remotos](docs/planning/remote-agents.md).
+
+El operador puede habilitar `--operator-checkpoint-dir` para capturar el estado persistente sin reiniciar ni cerrar las sesiones. La carpeta requiere `0700`, el mismo propietario que los datos y una ubicación fuera de estos y de repositorios Git. La copia contiene el trabajo privado de todas las personas, su inventario y las conexiones cifradas; debe consumirse y retirarse bajo el control de respaldo y privacidad. No se entrega mediante HTTP ni MCP.
 
 ### Actualizar una base alojada
 

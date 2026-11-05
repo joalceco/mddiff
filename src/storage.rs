@@ -45,6 +45,80 @@ pub(crate) fn conflict() -> AppError {
 }
 
 impl Storage {
+    pub(crate) fn checkpoint_directory(&self, directory: &Path) -> Result<PathBuf, AppError> {
+        if !cfg!(unix) {
+            return Err(AppError::bad_request(
+                "El checkpoint del operador requiere Unix.",
+            ));
+        }
+        private_path(directory, true)?;
+        let directory = directory.canonicalize().map_err(|_| unavailable())?;
+        if directory.starts_with(&self.directory)
+            || directory.to_str().is_none()
+            || directory
+                .ancestors()
+                .any(|parent| parent.join(".git").exists())
+        {
+            return Err(AppError::bad_request(
+                "La carpeta de checkpoints debe quedar fuera de los datos y de repositorios Git.",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let output = fs::metadata(&directory).map_err(|_| unavailable())?;
+            if output.mode() & 0o777 != 0o700
+                || output.uid()
+                    != fs::metadata(&self.directory)
+                        .map_err(|_| unavailable())?
+                        .uid()
+            {
+                return Err(AppError::bad_request(
+                    "El checkpoint requiere una carpeta 0700 del propietario de los datos.",
+                ));
+            }
+        }
+        Ok(directory)
+    }
+
+    pub(crate) fn checkpoint(&self, directory: &Path) -> Result<(), AppError> {
+        let directory = self.checkpoint_directory(directory)?;
+        let destination = directory.join("work.sqlite3");
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(AppError::bad_request(
+                "Retira el checkpoint anterior antes de solicitar otro.",
+            ));
+        }
+        let temporary = directory.join(".work.sqlite3.pending");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let output = options.open(&temporary).map_err(|_| unavailable())?;
+        let result = (|| {
+            let connection = self.connection.lock().map_err(|_| unavailable())?;
+            self.check_barrier()?;
+            connection
+                .execute("VACUUM INTO ?1", [temporary.to_str().unwrap()])
+                .map_err(|_| unavailable())?;
+            self.check_barrier()?;
+            output.sync_all().map_err(|_| unavailable())?;
+            // A hard link publishes complete bytes without replacing an operator's file.
+            fs::hard_link(&temporary, &destination).map_err(|_| unavailable())?;
+            fs::remove_file(&temporary).map_err(|_| unavailable())?;
+            fs::File::open(&directory)
+                .and_then(|parent| parent.sync_all())
+                .map_err(|_| unavailable())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
     pub(crate) fn check_health(&self) -> Result<(), AppError> {
         self.check_barrier()?;
         self.connection
