@@ -96,7 +96,7 @@ El lookup admite hasta 500 identificadores, lotes de 100, 16 páginas y 20 segun
 
 Solo se usa la correspondencia temporal entre identificador y tipo. El ADF, las etiquetas originales de sus menciones y el Markdown convertido no reciben datos del perfil consultado. El inventario conserva la fecha de lectura de la descripción, anterior a las consultas de clasificación. Un error de permiso devuelve `502`; límites, `413`; cuentas sin resolver, `422`; tiempo total agotado, `504`. Un rate limit conserva `429`. Todos mantienen documentos, inventarios, revisiones y eventos anteriores.
 
-El endpoint de [consulta de usuarios por identificador](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-users/#api-rest-api-3-user-bulk-get) requiere `read:jira-user` y Atlassian lo marca **Experimental** (consultado el 2026-11-05). Un grant antiguo puede seguir leyendo descripciones sin consultas adicionales; si estas son necesarias y carece de permiso, debe reconectarse. La configuración real del nuevo permiso y su validación siguen pendientes; esta sección describe el código de la rama.
+El endpoint de [consulta de usuarios por identificador](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-users/#api-rest-api-3-user-bulk-get) requiere `read:jira-user` y Atlassian lo marca **Experimental** (consultado el 2026-11-05). Un grant antiguo puede seguir leyendo descripciones sin consultas adicionales; si estas son necesarias y carece de permiso, debe reconectarse. El permiso real ya está configurado y consentido; la rama todavía no está desplegada en la beta.
 
 ## Verificar el contrato
 
@@ -123,7 +123,17 @@ La consola de Atlassian exige una atestación sobre **Personal Data Reporting AP
 
 La rama incorpora el inventario privado de cuentas y antigüedad, la herramienta de reporte y una [barrera externa de borrado](jira-privacy.md) en SQLite 6, todavía sin desplegar. Ese avance no acredita la operación periódica, la recuperación del cluster con la barrera ni la distribución a invitados.
 
-Verificado el 2026-11-05: pasan las 88 pruebas Rust, Clippy y las integraciones de Jira y conexiones con Keycloak sintético. La captura se prueba con la barrera externa activa, menciones sin tipo, paginación, permisos antiguos y cuentas app/persona diferentes por usuario. También se verifican errores de clasificación, límite de 500 cuentas, desconexión y cierre de sesión durante el lookup, propuestas MCP y recuperación del inventario tras reiniciar. No acredita el nuevo scope ni el lookup contra Jira real.
+Verificado el 2026-11-05: pasan las 88 pruebas Rust, Clippy y las integraciones de Jira y conexiones con Keycloak sintético. La captura se prueba con la barrera externa activa, menciones sin tipo, paginación, permisos antiguos y cuentas app/persona diferentes por usuario. También se verifican errores de clasificación, límite de 500 cuentas, desconexión y cierre de sesión durante el lookup, propuestas MCP y recuperación del inventario tras reiniciar. Estas pruebas sintéticas no acreditan por sí solas el nuevo scope ni el lookup contra Jira real.
+
+## Validación real del permiso de usuarios
+
+El 2026-11-05, con autorización del propietario, se configuró `read:jira-user` y se repitió el consentimiento de la app real. `accessible-resources` confirmó ambos permisos de lectura y el único sitio seleccionado. El binario `0e1c4a3`, servido en loopback con Keycloak sintético y un registro externo vacío activo, capturó una descripción real del sitio autorizado. Una propuesta enviada por MCP conservó exactamente el original y su procedencia; una revisión antigua recibió `409` y otra identidad quedó sin trabajo ni conexiones.
+
+El documento elegido no contenía cuentas estructuradas, por lo que esa captura no ejercitó la clasificación de menciones sin tipo. Para validar el contrato real del endpoint, el operador consultó la propia cuenta que dio el consentimiento y obtuvo `200`, una página de una cuenta y `accountType: atlassian`. Los perfiles se descartaron sin incorporarlos al Markdown ni al inventario del documento. Los casos ambiguos, la paginación y los fallos del conector conservan sus pruebas sintéticas; no se atribuyen al documento real.
+
+Se retiraron el callback temporal, las copias locales de documentos y claves, la copia local del grant temporal y la identidad sintética. El contenedor de Keycloak volvió a su estado inicial detenido. La credencial anterior y exclusiva del operador renovó después del nuevo consentimiento y mantuvo acceso al sitio, sin reemplazarla ni enviar un reporte de producción. La beta conserva `6bfccea`/SQLite 4; Sharing sigue deshabilitado.
+
+El [CI completo de `0e1c4a3`](https://github.com/joalceco/mddiff/actions/runs/42101018303) aprobó código y contenedor, incluidas las regresiones de navegador y capacidad de diez usuarios. La imagen candidata del mismo commit pasó además las pruebas de privacidad y 21 casos del coordinador en Linux, con un ciclo de captura, borrado y recuperación sintéticos. La política `findmnt` y Nginx se simularon en ese último ensayo; no acredita la activación del ciclo en el servicio publicado.
 
 ## Fuentes primarias
 

@@ -90,7 +90,9 @@ La comprobación consulta `GET https://api.atlassian.com/oauth/token/accessible-
 
 Al capturar una descripción con referencias de cuenta sin tipo, la rama consulta `GET /rest/api/3/user/bulk` para esos identificadores concretos. Conserva únicamente la clasificación transitoria persona/app; no incorpora nombres, correos ni avatares de la respuesta al documento o al inventario. Si falta permiso para esa consulta, se conserva el trabajo actual y se pide reconectar. Consulta [los límites y fallos de clasificación](jira-source.md#clasificación-de-referencias-de-cuenta).
 
-Estado al 2026-11-05: los tres scopes y el flujo de clasificación pasaron pruebas sintéticas. La app real de Atlassian y la beta publicada siguen con `read:jira-work` y `offline_access`; falta autorizar `read:jira-user`, repetir el consentimiento y verificar una consulta real antes de desplegar este cambio.
+Verificado el 2026-11-05: el propietario autorizó `read:jira-user`, se añadió en la consola y se repitió el consentimiento real, restringido al sitio seleccionado. Un visor local aislado con el binario `0e1c4a3` y la barrera activa capturó una descripción real y conservó el original al recibir una propuesta por MCP. El endpoint de usuarios devolvió una cuenta de tipo `atlassian` para la propia persona que consintió. El documento elegido no contenía cuentas estructuradas; los casos de menciones sin tipo siguen cubiertos por fixtures sintéticas. Consulta [el alcance de esta prueba](jira-source.md#validación-real-del-permiso-de-usuarios).
+
+Se retiraron el callback local temporal, las copias de documentos, claves y grant de la prueba, y su identidad sintética. La credencial previa y exclusiva del operador renovó después sin reemplazarla. La beta publicada sigue con `6bfccea` y sus scopes solicitados anteriores; la imagen nueva aún no se promovió. El nuevo consentimiento no habilita Sharing.
 
 Los refresh tokens rotativos se cifran y guardan antes de continuar con otras solicitudes. La renovación se serializa por usuario y destino; desconectar puede invalidar una comprobación en curso. Cortar la conexión HTTP del cliente no cancela una renovación ya iniciada.
 
