@@ -22,9 +22,10 @@ from test_hosted_auth import Browser, CheckFailed, NAVIGATION, Redirects, ROOT, 
 
 
 @contextmanager
-def application(base, oidc, connections, data):
+def application(base, oidc, connections, data, journal=None):
     process = subprocess.Popen([str(ROOT / "target/release/mddiff"), "--mode", "hosted", "--port", str(urlsplit(base).port),
-                                "--oidc-config", str(oidc), "--connections-config", str(connections), "--data-dir", str(data)],
+                                "--oidc-config", str(oidc), "--connections-config", str(connections), "--data-dir", str(data),
+                                *(["--jira-privacy-file", str(journal)] if journal is not None else [])],
                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         check(bool(select.select([process.stdout], [], [], 10)[0]), "Connections server did not announce its URL.")
@@ -91,7 +92,7 @@ def authorization(browser, provider, revision, destination="jira-alpha", user="a
     parsed = urlsplit(url)
     check(urlsplit(provider.base).netloc == parsed.netloc and parsed.path == "/authorize", "Jira authorization escaped its isolated fixture.")
     query = parse_qs(parsed.query)
-    check(set(query.get("scope", [""])[0].split()) == {"read:jira-work", "offline_access"}, "Jira requested excessive or insufficient OAuth scopes.")
+    check(set(query.get("scope", [""])[0].split()) == {"read:jira-work", "read:jira-user", "offline_access"}, "Jira requested excessive or insufficient OAuth scopes.")
     check(bool(query.get("state", [""])[0]), "Jira authorization omitted its user-bound state.")
     query["fixture_user"] = [user]
     query = Request(urlunsplit(parsed._replace(query=urlencode(query, doseq=True))))
@@ -256,6 +257,12 @@ def main():
                     code, _ = request(alice, provider, "/api/connections/jira-alpha/check", "POST", {"expected_revision": 2})
                     provider.resources_override = None
                     check(code in (400, 502), "Jira accepted a cloud ID paired with another destination URL.")
+                    provider.resources_override = [{"id": provider.sites[0]["cloud_id"], "url": provider.sites[0]["url"], "scopes": ["read:jira-work"]}]
+                    mutate(alice, provider, "jira-alpha", "check", 2)
+                    provider.resources_override = [{"id": provider.sites[0]["cloud_id"], "url": provider.sites[0]["url"], "scopes": ["read:jira-work", "read:jira-user", "write:jira-work"]}]
+                    code, _ = request(alice, provider, "/api/connections/jira-alpha/check", "POST", {"expected_revision": 2})
+                    provider.resources_override = None
+                    check(code == 502, "Jira accepted a broader write grant when user-read scope was present.")
 
                     phase = "rotating refresh tokens without optional token_type and captured-work preservation"
                     mutate(alice, provider, "jira-alpha", "", 2)

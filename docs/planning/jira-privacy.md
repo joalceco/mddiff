@@ -18,6 +18,8 @@ La documentación de Atlassian no determina específicamente cómo debe aplicar 
 
 `src/privacy.rs` recorre el ADF, incluidos subárboles que el conversor conserva como JSON. Recoge identificadores estructurados de menciones y campos `accountId`, con límites de profundidad y tamaño. No añade nombres, correos ni texto del documento al inventario. Los documentos originales conservan el contenido recibido y sus avisos de conversión.
 
+La captura resuelve los identificadores válidos sin tipo mediante una [consulta acotada a Jira](jira-source.md#clasificación-de-referencias-de-cuenta), con la credencial personal. Usa solo el tipo de cuenta devuelto, sin enriquecer el ADF ni guardar perfiles. Las cuentas app y las colecciones declaradas quedan fuera del inventario de personas. Los tipos explícitos desconocidos y las cuentas que no se pueden resolver siguen sin clasificar; una captura nueva se rechaza conservando el trabajo anterior. El lookup pasó pruebas sintéticas el 2026-11-05; todavía requiere autorizar `read:jira-user` y validarlo con la app real antes del despliegue.
+
 La columna privada `current_work.jira_privacy` conserva inventarios separados para original y propuesta. No se expone en `/api/work`, `/api/state` ni MCP; una entrada de documento tampoco puede proporcionarla. Cada registro contiene el identificador y la fecha de lectura del proveedor, en segundos Unix. No utiliza la fecha de modificación del issue.
 
 | Cambio del trabajo | Efecto en el inventario |
@@ -30,7 +32,7 @@ La columna privada `current_work.jira_privacy` conserva inventarios separados pa
 
 La conservación de referencias en propuestas derivadas es deliberadamente conservadora: el agente puede copiar nombres del original o de una propuesta anterior. El inventario no pretende comprobar si cada nombre sigue apareciendo literalmente.
 
-La migración 4→5 añade una columna, sin cambiar documentos, revisiones, conexiones o procedencia. Los documentos preexistentes quedan pendientes de clasificación: versiones anteriores podían haber sustituido la procedencia Jira sin borrar su propuesta. No se inventan identificadores ni fechas. Las menciones ambiguas, los identificadores inválidos y `unknown` también mantienen una marca pendiente; `unknown` no se incorpora a la lista de cuentas.
+La migración 4→5 añade una columna, sin cambiar documentos, revisiones, conexiones o procedencia. Los documentos preexistentes quedan pendientes de clasificación: versiones anteriores podían haber sustituido la procedencia Jira sin borrar su propuesta. No se inventan identificadores ni fechas. El lookup de nuevas capturas no reclasifica trabajos ni respaldos antiguos. Los identificadores inválidos y `unknown` mantienen una marca pendiente; `unknown` no se incorpora a la lista de cuentas.
 
 La migración 5→6 añade `privacy_guard`, una tabla de metadatos de operación sin Markdown. Registra la generación aplicada y que el registro externo es obligatorio. Una base que haya activado la barrera rechaza una apertura que omita su archivo. Los binarios anteriores al esquema 6 rechazan la base nueva. Antes de desplegar esta rama es necesario adaptar y probar respaldo, restauración y rollback; no se debe reducir `user_version` manualmente.
 
@@ -134,7 +136,7 @@ Cada trabajo modificado aumenta su revisión y conserva su fila vacía cuando co
 
 Las decisiones nuevas reservan rangos de revisión que no se solapan con el período anterior. Un borrado puede hacer saltar el contador: así, una propuesta emitida antes de ese borrado no vuelve a ser válida al recuperar un checkpoint antiguo. Los números siguen siendo enteros seguros para JavaScript; los clientes deben leer la revisión del servidor y tratarla como opaca. Los cambios ordinarios siguen aumentando en uno. Cada período permite hasta mil millones de escrituras después de su piso; al acercarse a ese límite se necesita una operación de avance de período, aún no implementada.
 
-Si alguna fila carece de clasificación suficiente, se revierte la transacción completa de documentos. El registro externo sigue siendo obligatorio: no se permite omitirlo para volver a servir la base. Con la barrera activa también se rechazan nuevas entradas con inventario sin clasificar. Esto incluye menciones ambiguas cuyo tipo no puede establecerse todavía; su resolución es necesaria antes de dar por terminada la integración.
+Si alguna fila carece de clasificación suficiente, se revierte la transacción completa de documentos. El registro externo sigue siendo obligatorio: no se permite omitirlo para volver a servir la base. Con la barrera activa también se rechazan nuevas entradas con inventario sin clasificar. La resolución de menciones sin tipo está implementada para nuevas capturas; no permite inventar una clasificación si el proveedor falla o devuelve un tipo desconocido.
 
 La aplicación conserva la generación aplicada y rechaza un registro anterior. Si el archivo, sus permisos o su directorio cambian mientras el proceso está activo, las nuevas lecturas del trabajo, escrituras y comprobaciones de salud fallan hasta reiniciar con el registro válido. Publicar una decisión requiere mantenimiento y escritor detenido; no se admite como actualización en caliente de vistas abiertas.
 

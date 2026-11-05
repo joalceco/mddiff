@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -17,6 +17,7 @@ use axum::{
 use mddiff::{
     AppError,
     connections::{ConnectionStore, CredentialRecord, Provider},
+    privacy::{AccountKind, JiraData},
     workspace::{Document, SourceMetadata, VerifiedIdentity},
 };
 use openidconnect::{CsrfToken, url::Url};
@@ -26,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::{App, auth::SessionHandle};
 
-const SCOPES: &str = "read:jira-work offline_access";
+const SCOPES: &str = "read:jira-work read:jira-user offline_access";
 const CALLBACK: &str = "/connections/jira/callback";
 const RESPONSE_LIMIT: usize = 256 * 1024;
 const MEMO_RESPONSE_LIMIT: usize = 6 * mddiff::MAX_DOCUMENT_BYTES as usize + 64 * 1024;
@@ -45,6 +46,46 @@ fn valid_jira_token_type(result: &Value) -> bool {
         Some(Value::String(value)) => value.eq_ignore_ascii_case("Bearer"),
         _ => false,
     }
+}
+
+fn unclassified() -> AppError {
+    AppError(StatusCode::UNPROCESSABLE_ENTITY, "Jira contiene referencias de cuenta que no se pudieron clasificar. Se conserva el trabajo actual.".into())
+}
+
+fn user_page(
+    page: &Value,
+    requested: &[String],
+    start: usize,
+    users: &mut BTreeMap<String, AccountKind>,
+) -> Result<(usize, bool), AppError> {
+    let values = page["values"].as_array().ok_or_else(failed)?;
+    let maximum = page["maxResults"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= 100)
+        .ok_or_else(failed)?;
+    let last = page["isLast"].as_bool().ok_or_else(failed)?;
+    let next = start + values.len();
+    if page["startAt"].as_u64() != Some(start as u64)
+        || values.len() as u64 > maximum
+        || next > requested.len()
+        || (!last && (values.is_empty() || next == requested.len()))
+        || page.get("total").is_some_and(|total| {
+            total
+                .as_u64()
+                .is_none_or(|total| total < next as u64 || total > requested.len() as u64)
+        })
+    {
+        return Err(failed());
+    }
+    for value in values {
+        let id = value["accountId"].as_str().ok_or_else(failed)?;
+        if !requested.iter().any(|requested| requested == id) || users.contains_key(id) {
+            return Err(failed());
+        }
+        let kind = AccountKind::from_api(&value["accountType"]).ok_or_else(unclassified)?;
+        users.insert(id.into(), kind);
+    }
+    Ok((next, last))
 }
 
 fn stale() -> AppError {
@@ -825,22 +866,40 @@ impl Providers {
             })?;
         let compute = workspace.compute_permit().await?;
         // Conversion shares the diff budget and retains capacity after caller cancellation.
-        let (mut converted, privacy) = tokio::task::spawn_blocking(move || {
-            let _capacity = capacity;
-            let _compute = compute;
-            let converted = mddiff::adf::convert(&description)?;
-            let privacy = mddiff::privacy::JiraData::from_adf(&description, retrieved_at)?;
-            Ok::<_, AppError>((converted, privacy))
-        })
-        .await
-        .map_err(|_| failed())?
-        .map_err(|e| {
-            if e.0 == StatusCode::BAD_REQUEST {
-                AppError(StatusCode::BAD_GATEWAY, e.1)
-            } else {
-                e
-            }
-        })?;
+        let conversion_capacity = Arc::clone(&capacity);
+        let (mut converted, mut privacy, unresolved, description) =
+            tokio::task::spawn_blocking(move || {
+                let _capacity = conversion_capacity;
+                let _compute = compute;
+                let converted = mddiff::adf::convert(&description)?;
+                let (privacy, unresolved) =
+                    JiraData::inspect_adf(&description, retrieved_at, &BTreeMap::new())?;
+                Ok::<_, AppError>((converted, privacy, unresolved, description))
+            })
+            .await
+            .map_err(|_| failed())?
+            .map_err(|e| {
+                if e.0 == StatusCode::BAD_REQUEST {
+                    AppError(StatusCode::BAD_GATEWAY, e.1)
+                } else {
+                    e
+                }
+            })?;
+        if !unresolved.is_empty() {
+            let users = tokio::time::timeout(Duration::from_secs(20), self.jira_user_kinds(d, &credential.access_token, unresolved))
+                .await.map_err(|_| AppError(StatusCode::GATEWAY_TIMEOUT, "Jira no completó la clasificación de cuentas a tiempo. Se conserva el trabajo actual.".into()))??;
+            let compute = workspace.compute_permit().await?;
+            privacy = tokio::task::spawn_blocking(move || {
+                let _capacity = capacity;
+                let _compute = compute;
+                JiraData::inspect_adf(&description, retrieved_at, &users).map(|result| result.0)
+            })
+            .await
+            .map_err(|_| failed())??;
+        }
+        if privacy.unclassified {
+            return Err(unclassified());
+        }
         if canonical != requested {
             converted.warnings.push(format!(
                 "Jira resolvió la referencia solicitada a su clave actual {canonical}."
@@ -871,6 +930,55 @@ impl Providers {
         ))
     }
 
+    async fn jira_user_kinds(
+        &self,
+        d: &Destination,
+        token: &str,
+        ids: BTreeSet<String>,
+    ) -> Result<BTreeMap<String, AccountKind>, AppError> {
+        if ids.len() > 500 {
+            return Err(AppError(StatusCode::PAYLOAD_TOO_LARGE, "La descripción contiene más de 500 cuentas sin clasificar. Se conserva el trabajo actual.".into()));
+        }
+        let ids: Vec<_> = ids.into_iter().collect();
+        let mut users = BTreeMap::new();
+        let mut pages = 0;
+        for batch in ids.chunks(100) {
+            let mut start = 0;
+            loop {
+                if pages == 16 {
+                    return Err(AppError(StatusCode::PAYLOAD_TOO_LARGE, "La clasificación de Jira supera el límite de páginas. Se conserva el trabajo actual.".into()));
+                }
+                pages += 1;
+                let mut url = self.jira_endpoint(
+                    &format!(
+                        "/ex/jira/{}/rest/api/3/user/bulk",
+                        d.cloud_id.as_deref().ok_or_else(failed)?
+                    ),
+                    false,
+                );
+                url.query_pairs_mut()
+                    .append_pair("startAt", &start.to_string())
+                    .append_pair("maxResults", "100");
+                for id in batch {
+                    url.query_pairs_mut().append_pair("accountId", id);
+                }
+                let page = self.request_json(url, &[], Some(token), None, RESPONSE_LIMIT, true).await.map_err(|error| {
+                    if matches!(error.0, StatusCode::TOO_MANY_REQUESTS | StatusCode::PAYLOAD_TOO_LARGE) { error }
+                    else { AppError(StatusCode::BAD_GATEWAY, "No se pudo clasificar las cuentas de Jira. Vuelve a conectar con permiso de lectura de usuarios y revisa el acceso al sitio.".into()) }
+                })?;
+                let (next, last) = user_page(&page, batch, start, &mut users)?;
+                if last {
+                    break;
+                }
+                start = next;
+            }
+            if batch.iter().any(|id| !users.contains_key(id)) {
+                return Err(unclassified());
+            }
+        }
+        Ok(users)
+    }
+
     async fn jira_resources(&self, d: &Destination, token: &str) -> Result<(), AppError> {
         let result = self
             .request(
@@ -893,7 +1001,10 @@ impl Providers {
                         scopes.iter().any(|s| s == "read:jira-work")
                             && scopes.iter().all(|s| {
                                 s.as_str().is_some_and(|s| {
-                                    matches!(s, "read:jira-work" | "offline_access")
+                                    matches!(
+                                        s,
+                                        "read:jira-work" | "read:jira-user" | "offline_access"
+                                    )
                                 })
                             })
                     })
@@ -937,7 +1048,7 @@ impl Providers {
         }
         if result["scope"].as_str().is_some_and(|s| {
             !s.split_ascii_whitespace()
-                .all(|s| matches!(s, "read:jira-work" | "offline_access"))
+                .all(|s| matches!(s, "read:jira-work" | "read:jira-user" | "offline_access"))
         }) {
             return Err(failed());
         }
@@ -1385,5 +1496,73 @@ mod tests {
             false
         ));
         assert!(allowed_ip("8.8.8.8".parse().unwrap(), &[], false));
+    }
+    #[test]
+    fn user_pages_match_only_requested_accounts_and_ignore_profile_details() {
+        let requested = vec!["synthetic:alice".into(), "synthetic:app".into()];
+        let mut users = BTreeMap::new();
+        let first = json!({"startAt":0,"maxResults":1,"total":2,"isLast":false,"nextPage":"https://untrusted.example/never-follow",
+                           "values":[{"accountId":"synthetic:alice","accountType":"atlassian","displayName":"Private directory name","emailAddress":"private@example.invalid"}]});
+        assert_eq!(
+            user_page(&first, &requested, 0, &mut users).unwrap(),
+            (1, false)
+        );
+        let second = json!({"startAt":1,"maxResults":1,"total":2,"isLast":true,"values":[{"accountId":"synthetic:app","accountType":"app"}]});
+        assert_eq!(
+            user_page(&second, &requested, 1, &mut users).unwrap(),
+            (2, true)
+        );
+        assert_eq!(
+            users,
+            BTreeMap::from([
+                ("synthetic:alice".into(), AccountKind::Person),
+                ("synthetic:app".into(), AccountKind::App)
+            ])
+        );
+        assert!(user_page(&second, &requested, 1, &mut users).is_err());
+    }
+
+    #[test]
+    fn user_pages_reject_foreign_duplicate_or_unclassified_accounts() {
+        let requested = vec!["synthetic:alice".into(), "synthetic:bob".into()];
+        for values in [
+            json!([{"accountId":"synthetic:foreign","accountType":"atlassian"}]),
+            json!([{"accountId":"synthetic:alice","accountType":"atlassian"},{"accountId":"synthetic:alice","accountType":"app"}]),
+            json!([{"accountId":"synthetic:alice"}]),
+            json!([{"accountId":"synthetic:alice","accountType":"future"}]),
+            json!([{"accountId":null,"accountType":"atlassian"}]),
+        ] {
+            assert!(
+                user_page(
+                    &json!({"startAt":0,"maxResults":100,"isLast":true,"values":values}),
+                    &requested,
+                    0,
+                    &mut BTreeMap::new()
+                )
+                .is_err()
+            );
+        }
+        for (field, value) in [
+            ("startAt", json!(1)),
+            ("startAt", json!("0")),
+            ("maxResults", json!(0)),
+            ("maxResults", json!(101)),
+            ("isLast", Value::Null),
+            ("total", json!(3)),
+            ("total", json!(0)),
+        ] {
+            let mut page = json!({"startAt":0,"maxResults":100,"isLast":true,"values":[{"accountId":"synthetic:alice","accountType":"atlassian"}]});
+            page[field] = value;
+            assert!(user_page(&page, &requested, 0, &mut BTreeMap::new()).is_err());
+        }
+        assert!(
+            user_page(
+                &json!({"startAt":0,"maxResults":100,"isLast":false,"values":[]}),
+                &requested,
+                0,
+                &mut BTreeMap::new()
+            )
+            .is_err()
+        );
     }
 }

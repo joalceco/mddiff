@@ -192,6 +192,8 @@ Pulsa **Abrir Jira** en la cabecera de **Original**, elige una conexión persona
 
 La conversión `adf-md-v1` conserva el contenido admitido de párrafos, encabezados, marcas, listas, enlaces, tablas simples y código. Los nodos o atributos no representables generan avisos visibles y una representación identificable; no se ocultan como una importación íntegra. No se leen comentarios, adjuntos ni recursos enlazados. Los errores de permiso o disponibilidad conservan la comparación. Consulta [el alcance, límites y contrato de Jira](docs/planning/jira-source.md).
 
+La rama resuelve las referencias de cuenta sin tipo con una consulta acotada de lectura a Jira, sin añadir datos del perfil al Markdown. Solicita además `read:jira-user`; la configuración y validación real de ese nuevo permiso siguen pendientes antes del despliegue. Si la clasificación falla, conserva la comparación actual.
+
 ### Actualizar una captura y coordinar pestañas
 
 Las capturas de Jira/Memos permanecen fijas aunque cambie el proveedor. **Actualizar origen** vuelve a leer la referencia capturada con la revisión vigente al pulsar; conserva la propuesta. Un fallo o conflicto `409` mantiene el trabajo confirmado y exige un nuevo intento explícito, sin sobrescribir una propuesta recibida durante la lectura.

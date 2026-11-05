@@ -23,14 +23,28 @@ def jira_sources():
             for user in ("alice", "bob")}
         state.issue_errors = {}
         state.issue_redirect = False
+        state.users = {(user, uid): {"accountId": uid, "accountType": kind,
+                                    "displayName": "Private directory label", "emailAddress": "directory@example.invalid"}
+                       for user in ("alice", "bob")
+                       for uid, kind in [("synthetic:lookup-person", "atlassian" if user == "alice" else "app"),
+                                         ("synthetic:lookup-app", "app")]}
+        state.user_page_size = 100
+        state.user_error = None
+        state.user_override = None
+        state.user_redirect = False
+        state.user_oversized = False
 
         def read_only():
             allowed = {("GET", "/authorize"), ("GET", "/oauth/token/accessible-resources"), ("POST", "/oauth/token")}
             for row in state.audit:
                 issue = row["path"].startswith("/ex/jira/synthetic-alpha/rest/api/3/issue/")
-                assert (row["method"], row["path"]) in allowed or (row["method"] == "GET" and issue), "Unexpected Jira business request"
+                users = row["path"] == "/ex/jira/synthetic-alpha/rest/api/3/user/bulk"
+                assert (row["method"], row["path"]) in allowed or (row["method"] == "GET" and (issue or users)), "Unexpected Jira business request"
                 if issue:
                     assert row["fields"] == ["description", "summary", "updated"], "Jira requested comments, attachments or another field"
+                if users:
+                    assert row["max_results"] == 100 and 0 < len(row["account_ids"]) <= 100, "Unexpected account lookup bounds"
+                    assert len(set(row["account_ids"])) == len(row["account_ids"]), "Account lookup was not deduplicated"
             assert all(row["grant"] in (None, "authorization_code", "refresh_token") for row in state.audit)
 
         state.assert_read_only = read_only
@@ -70,6 +84,37 @@ def jira_sources():
             def do_GET(self):
                 parsed = urlsplit(self.path)
                 prefix = "/ex/jira/synthetic-alpha/rest/api/3/issue/"
+                if parsed.path == "/ex/jira/synthetic-alpha/rest/api/3/user/bulk":
+                    state.wait(parsed.path)
+                    access = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                    user = state.access.get(access)
+                    query = parse_qs(parsed.query)
+                    with state.lock:
+                        state.record("GET", parsed.path, user)
+                        ids = query.get("accountId", [])
+                        state.audit[-1].update(account_ids=ids, start=query.get("startAt"), max_results=int(query.get("maxResults", [0])[0]))
+                        if user is None or user in state.revoked:
+                            self.reply(401, {"error": "synthetic denied credential: " + access})
+                            return
+                        if set(query) != {"accountId", "startAt", "maxResults"} or query["maxResults"] != ["100"] or not 0 < len(ids) <= 100:
+                            self.reply(400, {"error": "overbroad account read"})
+                            return
+                        if state.user_error:
+                            self.reply(state.user_error, {"error": "private directory error " + access}, {"Retry-After": "1"})
+                        elif state.user_redirect:
+                            self.reply(302, {}, {"Location": state.base + "/never-follow-credential"})
+                        elif state.user_oversized:
+                            self.reply(200, {"unused": "x" * (256 * 1024 + 1)})
+                        elif state.user_override is not None:
+                            self.reply(200, state.user_override)
+                        else:
+                            start = int(query["startAt"][0])
+                            values = [state.users[user, uid] for uid in reversed(ids) if (user, uid) in state.users]
+                            maximum = min(100, state.user_page_size)
+                            page = values[start:start + maximum]
+                            self.reply(200, {"startAt": start, "maxResults": maximum, "total": len(values), "isLast": start + len(page) >= len(values),
+                                             "values": page, "nextPage": "http://169.254.169.254/never-follow"})
+                    return
                 if not parsed.path.startswith(prefix):
                     self.forward()
                     return

@@ -82,6 +82,22 @@ La conversión acepta únicamente raíz ADF `doc`, versión `1`, con una lista d
 
 El commit comprueba nuevamente la revisión del trabajo y la generación de la conexión dentro de la transacción. La sesión web se revalida después de la lectura. Una propuesta del agente recibida durante una descarga, una desconexión o un reemplazo de credenciales impiden que una lectura tardía restaure una base antigua.
 
+## Clasificación de referencias de cuenta
+
+La rama clasifica las referencias estructuradas antes de guardar una captura. Las menciones ADF con `userType: DEFAULT` identifican personas; `APP` y `SPECIAL` quedan fuera del inventario de personas. Si falta el tipo o es `null`, consulta únicamente los identificadores válidos presentes en el ADF mediante el endpoint del sitio aprobado:
+
+```text
+GET https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/user/bulk?startAt=0&maxResults=100&accountId=…
+```
+
+Los campos estructurados `accountId` siguen el mismo criterio. Se deduplican las cuentas y se aceptan solo `accountType` conocidos: `atlassian` y `customer` son personas; `app` se excluye. Un tipo explícito desconocido, una cuenta ausente o `unknown` impiden confirmar la captura. No se deducen cuentas a partir de nombres o correos del texto.
+
+El lookup admite hasta 500 identificadores, lotes de 100, 16 páginas y 20 segundos en total; cada respuesta conserva el límite de 256 KiB. La aplicación construye la paginación y nunca sigue `nextPage`. Rechaza cuentas no solicitadas, duplicados y respuestas inconsistentes. Las consultas usan la credencial personal y las mismas restricciones de red; no existe una caché compartida entre usuarios.
+
+Solo se usa la correspondencia temporal entre identificador y tipo. El ADF, las etiquetas originales de sus menciones y el Markdown convertido no reciben datos del perfil consultado. El inventario conserva la fecha de lectura de la descripción, anterior a las consultas de clasificación. Un error de permiso devuelve `502`; límites, `413`; cuentas sin resolver, `422`; tiempo total agotado, `504`. Un rate limit conserva `429`. Todos mantienen documentos, inventarios, revisiones y eventos anteriores.
+
+El endpoint de [consulta de usuarios por identificador](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-users/#api-rest-api-3-user-bulk-get) requiere `read:jira-user` y Atlassian lo marca **Experimental** (consultado el 2026-11-05). Un grant antiguo puede seguir leyendo descripciones sin consultas adicionales; si estas son necesarias y carece de permiso, debe reconectarse. La configuración real del nuevo permiso y su validación siguen pendientes; esta sección describe el código de la rama.
+
 ## Verificar el contrato
 
 Las fixtures usan sitios, cuentas y textos sintéticos. Con la fixture Keycloak aislada iniciada y el binario `release` actualizado:
@@ -103,9 +119,11 @@ El commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070` está desplegado con SQLite
 
 El 2026-11-04, con el secreto externo privado configurado, la cuenta propietaria completó OAuth y una cuenta desechable de mddiff abrió la descripción de un issue real autorizado. El visor mostró referencia, captura, `adf-md-v1` y avisos. Codex real leyó ese trabajo y envió una propuesta sintética por MCP: el original y su procedencia permanecieron iguales, otra cuenta quedó vacía y una revisión antigua recibió `409`. No hubo turnos de modelo ni escrituras en Jira. Esta prueba acredita un caso real, no todo ADF ni otra cuenta Atlassian; esos contratos conservan sus fixtures sintéticas.
 
-La consola de Atlassian exige una atestación sobre **Personal Data Reporting API** para aplicaciones que almacenan datos personales antes de habilitar Sharing. Esa API no está implementada en mddiff. [#17](https://github.com/joalceco/mddiff/issues/17) conserva este bloqueo; no se ha emitido la atestación ni se habilita autorización para otras cuentas. Consulta [la configuración de consentimiento](personal-connections.md#consentimiento-de-jira-cloud) para separar la aplicación privada de su distribución.
+La consola de Atlassian exige una atestación sobre **Personal Data Reporting API** para aplicaciones que almacenan datos personales antes de habilitar Sharing. La rama incluye el reporter, pero su operación periódica y la barrera de recuperación todavía no están activas en la beta. [#17](https://github.com/joalceco/mddiff/issues/17) conserva este bloqueo; no se ha emitido la atestación ni se habilita autorización para otras cuentas. Consulta [la configuración de consentimiento](personal-connections.md#consentimiento-de-jira-cloud) para separar la aplicación privada de su distribución.
 
 La rama incorpora el inventario privado de cuentas y antigüedad, la herramienta de reporte y una [barrera externa de borrado](jira-privacy.md) en SQLite 6, todavía sin desplegar. Ese avance no acredita la operación periódica, la recuperación del cluster con la barrera ni la distribución a invitados.
+
+Verificado el 2026-11-05: pasan las 88 pruebas Rust, Clippy y las integraciones de Jira y conexiones con Keycloak sintético. La captura se prueba con la barrera externa activa, menciones sin tipo, paginación, permisos antiguos y cuentas app/persona diferentes por usuario. También se verifican errores de clasificación, límite de 500 cuentas, desconexión y cierre de sesión durante el lookup, propuestas MCP y recuperación del inventario tras reiniciar. No acredita el nuevo scope ni el lookup contra Jira real.
 
 ## Fuentes primarias
 

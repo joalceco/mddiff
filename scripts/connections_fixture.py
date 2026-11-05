@@ -53,7 +53,7 @@ class Providers:
         self.refresh[refresh] = user
         self.secrets.update((access, refresh))
         result = {"access_token": access, "refresh_token": refresh, "expires_in": self.token_lifespan,
-                  "scope": "read:jira-work offline_access"}
+                  "scope": "read:jira-work read:jira-user offline_access"}
         if self.token_type is not None:
             result["token_type"] = self.token_type
         return result
@@ -97,7 +97,7 @@ def providers():
                     user = query.get("fixture_user", ["alice"])[0]
                     state.record("GET", parsed.path, user)
                     if (user not in state.memos or query.get("client_id") != [state.client_id]
-                            or set(query.get("scope", [""])[0].split()) != {"read:jira-work", "offline_access"}
+                            or set(query.get("scope", [""])[0].split()) != {"read:jira-work", "read:jira-user", "offline_access"}
                             or query.get("audience") != ["api.atlassian.com"]
                             or query.get("response_type") != ["code"] or query.get("prompt") != ["consent"]):
                         self.reply(400, {"error": "synthetic_invalid_authorization"})
@@ -123,7 +123,7 @@ def providers():
                     self.reply(200, {"user": {"name": "users/" + user, "username": user, "role": "USER"}})
                 elif parsed.path == "/oauth/token/accessible-resources":
                     self.reply(200, state.resources_override if state.resources_override is not None else [{
-                        "id": state.sites[0]["cloud_id"], "name": "Synthetic Jira", "url": state.sites[0]["url"], "scopes": ["read:jira-work"],
+                        "id": state.sites[0]["cloud_id"], "name": "Synthetic Jira", "url": state.sites[0]["url"], "scopes": ["read:jira-work", "read:jira-user"],
                     }])
                 else:
                     self.reply(404, {"error": "unsupported synthetic read"})

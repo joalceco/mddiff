@@ -1,11 +1,27 @@
 //! Private inventory of structured Atlassian identities, never a free-text PII classifier.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::AppError;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AccountKind {
+    Person,
+    App,
+}
+
+impl AccountKind {
+    pub fn from_api(value: &Value) -> Option<Self> {
+        match value.as_str() {
+            Some("atlassian" | "customer") => Some(Self::Person),
+            Some("app") => Some(Self::App),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
@@ -16,9 +32,18 @@ pub struct JiraData {
 
 impl JiraData {
     pub fn from_adf(document: &Value, retrieved_at: u64) -> Result<Self, AppError> {
+        Ok(Self::inspect_adf(document, retrieved_at, &BTreeMap::new())?.0)
+    }
+
+    pub fn inspect_adf(
+        document: &Value,
+        retrieved_at: u64,
+        users: &BTreeMap<String, AccountKind>,
+    ) -> Result<(Self, BTreeSet<String>), AppError> {
         let mut result = Self::default();
-        result.visit(document, retrieved_at, 0, &mut 0)?;
-        Ok(result)
+        let mut unresolved = BTreeSet::new();
+        result.visit(document, retrieved_at, 0, &mut 0, users, &mut unresolved)?;
+        Ok((result, unresolved))
     }
 
     fn visit(
@@ -27,6 +52,8 @@ impl JiraData {
         at: u64,
         depth: usize,
         nodes: &mut usize,
+        users: &BTreeMap<String, AccountKind>,
+        unresolved: &mut BTreeSet<String>,
     ) -> Result<(), AppError> {
         *nodes += 1;
         if depth > 128 || *nodes > 262_144 {
@@ -40,22 +67,34 @@ impl JiraData {
                     let attrs = &value["attrs"];
                     // SPECIAL identifies collections; APP identifies apps rather than people.
                     if !matches!(attrs["userType"].as_str(), Some("SPECIAL" | "APP")) {
-                        if attrs["userType"].as_str() != Some("DEFAULT") {
-                            self.unclassified = true;
-                        }
-                        self.account(&attrs["id"], at);
+                        self.identity(
+                            &attrs["id"],
+                            (attrs["userType"].as_str() == Some("DEFAULT"))
+                                .then_some(AccountKind::Person),
+                            attrs["userType"].is_null(),
+                            at,
+                            users,
+                            unresolved,
+                        );
                     }
                 }
                 if let Some(id) = object.get("accountId") {
-                    self.account(id, at);
+                    self.identity(
+                        id,
+                        AccountKind::from_api(&value["accountType"]),
+                        value["accountType"].is_null(),
+                        at,
+                        users,
+                        unresolved,
+                    );
                 }
                 for child in object.values() {
-                    self.visit(child, at, depth + 1, nodes)?;
+                    self.visit(child, at, depth + 1, nodes, users, unresolved)?;
                 }
             }
             Value::Array(children) => {
                 for child in children {
-                    self.visit(child, at, depth + 1, nodes)?;
+                    self.visit(child, at, depth + 1, nodes, users, unresolved)?;
                 }
             }
             _ => {}
@@ -63,13 +102,31 @@ impl JiraData {
         Ok(())
     }
 
-    fn account(&mut self, value: &Value, at: u64) {
-        match value.as_str() {
-            Some("unknown") => self.unclassified = true,
-            Some(id) if valid_account_id(id) => {
-                self.accounts.entry(id.to_owned()).or_insert(at);
+    fn identity(
+        &mut self,
+        value: &Value,
+        kind: Option<AccountKind>,
+        lookup: bool,
+        at: u64,
+        users: &BTreeMap<String, AccountKind>,
+        unresolved: &mut BTreeSet<String>,
+    ) {
+        let Some(id) = value.as_str().filter(|id| valid_account_id(id)) else {
+            self.unclassified = true;
+            return;
+        };
+        let kind = match (kind, lookup) {
+            (None, true) => users.get(id).copied(),
+            _ => kind,
+        };
+        if kind != Some(AccountKind::App) {
+            self.accounts.entry(id.to_owned()).or_insert(at);
+        }
+        if kind.is_none() {
+            self.unclassified = true;
+            if lookup {
+                unresolved.insert(id.to_owned());
             }
-            _ => self.unclassified = true,
         }
     }
 
@@ -177,5 +234,100 @@ mod tests {
         )
         .unwrap();
         assert!(!data.unclassified);
+    }
+
+    #[test]
+    fn resolved_account_types_complete_the_inventory_without_changing_adf() {
+        let adf = json!({"type":"doc","version":1,"content":[{"type":"futureNode","content":[
+            {"type":"mention","attrs":{"id":"synthetic:alice","text":"@Original Name"}},
+            {"type":"mention","attrs":{"id":"synthetic:alice","userType":null}},
+            {"type":"mention","attrs":{"id":"synthetic:app"}},
+            {"attrs":{"accountId":"synthetic:customer","accountType":"customer"}},
+            {"attrs":{"accountId":"synthetic:other-app","accountType":"app"}},
+            {"attrs":{"accountId":"synthetic:bob","displayName":"Original Bob"}}
+        ]}]});
+        let original = adf.clone();
+        let (initial, unresolved) = JiraData::inspect_adf(&adf, 100, &BTreeMap::new()).unwrap();
+        assert!(initial.unclassified);
+        assert_eq!(
+            unresolved,
+            BTreeSet::from([
+                "synthetic:alice".into(),
+                "synthetic:app".into(),
+                "synthetic:bob".into()
+            ])
+        );
+        let users = BTreeMap::from([
+            ("synthetic:alice".into(), AccountKind::Person),
+            ("synthetic:app".into(), AccountKind::App),
+            ("synthetic:bob".into(), AccountKind::Person),
+        ]);
+        let (resolved, missing) = JiraData::inspect_adf(&adf, 100, &users).unwrap();
+        assert!(!resolved.unclassified && missing.is_empty());
+        assert_eq!(
+            resolved.accounts,
+            BTreeMap::from([
+                ("synthetic:alice".into(), 100),
+                ("synthetic:customer".into(), 100),
+                ("synthetic:bob".into(), 100),
+            ])
+        );
+        assert_eq!(adf, original);
+        assert_eq!(
+            crate::adf::convert(&adf).unwrap().markdown,
+            crate::adf::convert(&original).unwrap().markdown
+        );
+        assert!(
+            !serde_json::to_string(&resolved)
+                .unwrap()
+                .contains("Original")
+        );
+    }
+
+    #[test]
+    fn lookup_cannot_override_invalid_or_explicit_mention_types() {
+        let users = BTreeMap::from([("synthetic:alice".into(), AccountKind::Person)]);
+        for kind in [json!("FUTURE"), json!(false)] {
+            let adf = json!({"type":"mention","attrs":{"id":"synthetic:alice","userType":kind}});
+            let (data, unresolved) = JiraData::inspect_adf(&adf, 100, &users).unwrap();
+            assert!(data.unclassified && unresolved.is_empty());
+        }
+        for kind in ["APP", "SPECIAL"] {
+            let (data, unresolved) = JiraData::inspect_adf(
+                &json!({"type":"mention","attrs":{"id":"synthetic:alice","userType":kind}}),
+                100,
+                &users,
+            )
+            .unwrap();
+            assert_eq!(data, JiraData::default());
+            assert!(unresolved.is_empty());
+        }
+        for id in [json!(null), json!("unknown"), json!("bad id")] {
+            let (data, unresolved) =
+                JiraData::inspect_adf(&json!({"type":"mention","attrs":{"id":id}}), 100, &users)
+                    .unwrap();
+            assert!(data.unclassified && unresolved.is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_account_kinds_never_default_to_person() {
+        assert_eq!(
+            AccountKind::from_api(&json!("atlassian")),
+            Some(AccountKind::Person)
+        );
+        assert_eq!(
+            AccountKind::from_api(&json!("customer")),
+            Some(AccountKind::Person)
+        );
+        assert_eq!(AccountKind::from_api(&json!("app")), Some(AccountKind::App));
+        for value in [
+            Value::Null,
+            json!("unknown"),
+            json!("DEFAULT"),
+            json!(false),
+        ] {
+            assert_eq!(AccountKind::from_api(&value), None);
+        }
     }
 }

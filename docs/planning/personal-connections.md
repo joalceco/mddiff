@@ -74,10 +74,10 @@ Cada petición fija sus resultados DNS comprobados, desactiva proxies del entorn
 
 Administración registra una aplicación 3LO de mddiff en Atlassian; cada usuario concede acceso a esa aplicación con su propia cuenta. No se pide un API token de Jira ni un secreto de aplicación a cada usuario. Elige acceso **Resource-level** para limitar el consentimiento al sitio seleccionado. La aplicación es privada por defecto; su propietario puede probarla con su propia cuenta una vez configurado el secreto OAuth válido.
 
-**Sharing permanece deshabilitado.** La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea autorizar otras cuentas de Atlassian. No se ha emitido esa atestación. Habilitar Sharing en una entrega futura permitiría que otras personas autoricen sus conexiones; no les concedería acceso automático a datos de otros usuarios ni publicaría la aplicación en Marketplace.
+**Sharing permanece deshabilitado.** La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales. La rama incluye el reporter; su ciclo periódico y la barrera de recuperación todavía no están activos en la beta. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea autorizar otras cuentas de Atlassian. No se ha emitido esa atestación. Habilitar Sharing en una entrega futura permitiría que otras personas autoricen sus conexiones; no les concedería acceso automático a datos de otros usuarios ni publicaría la aplicación en Marketplace.
 
 1. Registra exactamente `https://review.example/connections/jira/callback` usando el origen público real de mddiff.
-2. Añade el scope clásico `read:jira-work`. El flujo solicita además `offline_access` para renovar el acceso. No añadas permisos de escritura para este conector.
+2. Añade los scopes clásicos `read:jira-work` y `read:jira-user`. El flujo solicita además `offline_access` para renovar el acceso. No añadas permisos de escritura para este conector.
 3. Configura el sitio y `cloud_id` autorizados en el JSON privado.
 4. Pulsa **Conectar** y acepta el consentimiento personal de Atlassian.
 5. Pulsa **Comprobar** para verificar el acceso al sitio aprobado.
@@ -86,7 +86,11 @@ El flujo usa Authorization Code con cliente confidencial. El estado dura cinco m
 
 Configura el proxy de publicación para no registrar queries del callback, cabeceras Authorization o cookies. La aplicación devuelve errores genéricos y no imprime respuestas OAuth ni valores rechazados por el parser JSON.
 
-La comprobación consulta `GET https://api.atlassian.com/oauth/token/accessible-resources` y exige coincidencia del sitio, su URL y los scopes de lectura previstos. No solicita perfil ni `read:jira-user`. Los únicos POST salientes son los intercambios y renovaciones OAuth en `https://auth.atlassian.com/oauth/token`.
+La comprobación consulta `GET https://api.atlassian.com/oauth/token/accessible-resources` y exige coincidencia del sitio, su URL y los scopes de lectura previstos. Acepta también un grant anterior con solo `read:jira-work`; no exige reconectar para descripciones que ya identifican sus cuentas. Los únicos POST salientes de la conexión son los intercambios y renovaciones OAuth en `https://auth.atlassian.com/oauth/token`.
+
+Al capturar una descripción con referencias de cuenta sin tipo, la rama consulta `GET /rest/api/3/user/bulk` para esos identificadores concretos. Conserva únicamente la clasificación transitoria persona/app; no incorpora nombres, correos ni avatares de la respuesta al documento o al inventario. Si falta permiso para esa consulta, se conserva el trabajo actual y se pide reconectar. Consulta [los límites y fallos de clasificación](jira-source.md#clasificación-de-referencias-de-cuenta).
+
+Estado al 2026-11-05: los tres scopes y el flujo de clasificación pasaron pruebas sintéticas. La app real de Atlassian y la beta publicada siguen con `read:jira-work` y `offline_access`; falta autorizar `read:jira-user`, repetir el consentimiento y verificar una consulta real antes de desplegar este cambio.
 
 Los refresh tokens rotativos se cifran y guardan antes de continuar con otras solicitudes. La renovación se serializa por usuario y destino; desconectar puede invalidar una comprobación en curso. Cortar la conexión HTTP del cliente no cancela una renovación ya iniciada.
 

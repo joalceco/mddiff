@@ -21,6 +21,7 @@ from test_hosted_mcp import tool
 
 
 PATH = "/ex/jira/synthetic-alpha/rest/api/3/issue/PROJ-1"
+USER_PATH = "/ex/jira/synthetic-alpha/rest/api/3/user/bulk"
 
 
 def capture(browser, provider, reference="PROJ-1", expected=None):
@@ -57,8 +58,11 @@ def main():
                 "introspection_client_id": "mddiff-resource", "introspection_client_secret": runtime["resource_client"]["secret"], "audience": "mddiff-resource", "allow_insecure_loopback": True}))
             fixture.private_write(config, json.dumps({"key_file": str(key), "jira": {"client_id": provider.client_id,
                 "client_secret": provider.client_secret, "sites": provider.sites}, "allow_insecure_loopback": True, "jira_test_origin": provider.base}))
+            privacy_directory = directory / "privacy"; privacy_directory.mkdir(mode=0o700)
+            journal = privacy_directory / "journal.json"
+            fixture.private_write(journal, json.dumps({"version": 1, "generation": 0, "revision_floor": 0, "accounts": {}}))
             with audience_clients(runtime, base + "/mcp"), web_client(runtime, base):
-                with application(base, oidc, config, data):
+                with application(base, oidc, config, data, journal):
                     phase = "personal OAuth and private snapshots"
                     alice, bob = login(runtime, base)
                     for name, browser in (("alice", alice), ("bob", bob)):
@@ -99,6 +103,60 @@ def main():
                           "Adjacent ADF marks inserted delimiter text or changed formatting in the viewer.")
                     before = work(alice, provider)
 
+                    phase = "ambiguous mentions use bounded personal user lookups with the barrier active"
+                    env = SimpleNamespace(base=base, trust=None, runtime=runtime)
+                    unresolved = {"type": "doc", "version": 1, "content": [{"type": "futureNode", "content": [
+                        {"type": "mention", "attrs": {"id": "synthetic:lookup-person", "text": "@Original label"}},
+                        {"type": "mention", "attrs": {"id": "synthetic:lookup-person", "userType": None}},
+                        {"type": "mention", "attrs": {"id": "synthetic:lookup-app"}},
+                        {"type": "mention", "attrs": {"id": "all", "userType": "SPECIAL"}},
+                        {"type": "mention", "attrs": {"id": "known-app", "userType": "APP"}},
+                        {"type": "futureAttrs", "attrs": {"accountId": "synthetic:lookup-person"}},
+                    ]}]}
+                    provider.user_page_size = 1
+                    lookup_times = {}
+                    for i, (name, browser) in enumerate((("alice", alice), ("bob", bob))):
+                        provider.issues[name, "PROJ-2"] = {"key": "PROJ-2", "fields": {"summary": "Original issue", "description": unresolved}}
+                        previous = work(browser, provider)
+                        count = len(provider.audit)
+                        check(capture(browser, provider, "PROJ-2")[0] == 200, "Ambiguous mention failed despite a matching account type lookup.")
+                        streams[i].revision(previous["revision"] + 1); streams[1-i].unchanged()
+                        current = work(browser, provider)
+                        lookup_times[name] = current["base_source"]["captured_at"]
+                        check("@Original label" in current["base"]["markdown"] and "userType\":null" in current["base"]["markdown"].replace(" ", "")
+                              and "Private directory label" not in json.dumps(current) and "directory@example.invalid" not in json.dumps(current),
+                              "Account lookup altered the original ADF or added fetched profile data.")
+                        calls = [row for row in provider.audit[count:] if row["path"] == USER_PATH]
+                        check(len(calls) == 2 and [row["start"] for row in calls] == [["0"], ["1"]]
+                              and all(row["user"] == name and set(row["account_ids"]) == {"synthetic:lookup-person", "synthetic:lookup-app"} for row in calls),
+                              "Account lookup crossed owners, ignored pagination or requested declared/duplicate identities.")
+                        result = tool(env, token(env, user=name), "submit_proposal", {"expected_revision": current["revision"],
+                                      "candidate": {"label": "derived.md", "markdown": "# Derived synthetic proposal\n"}})
+                        check(not result.get("isError"), "Derived proposal failed with resolved Jira privacy metadata.")
+                        streams[i].revision(current["revision"] + 1)
+                    for upstream, status in [(403, 502), (429, 429), (500, 502)]:
+                        provider.user_error = upstream
+                        rejected(alice, provider, "PROJ-2", status, streams[0])
+                    provider.user_error = None
+                    missing = provider.users.pop(("alice", "synthetic:lookup-person"))
+                    rejected(alice, provider, "PROJ-2", 422, streams[0])
+                    provider.users["alice", "synthetic:lookup-person"] = missing
+                    missing["accountType"] = "future"
+                    rejected(alice, provider, "PROJ-2", 422, streams[0])
+                    missing["accountType"] = "atlassian"
+                    provider.user_override = {"startAt": 0, "maxResults": 100, "isLast": True,
+                                              "values": [{"accountId": "synthetic:foreign", "accountType": "atlassian"}]}
+                    rejected(alice, provider, "PROJ-2", 502, streams[0]); provider.user_override = None
+                    provider.user_redirect = True; rejected(alice, provider, "PROJ-2", 502, streams[0]); provider.user_redirect = False
+                    provider.user_oversized = True; rejected(alice, provider, "PROJ-2", 413, streams[0]); provider.user_oversized = False
+                    provider.issues["alice", "PROJ-3"] = {"key": "PROJ-3", "fields": {"summary": "Bounded identity set", "description": {
+                        "type": "doc", "version": 1, "content": [{"type": "futureNode", "attrs": {"entries": [
+                            {"accountId": f"synthetic:person-{i}"} for i in range(501)]}}]}}}
+                    lookups = sum(row["path"] == USER_PATH for row in provider.audit)
+                    rejected(alice, provider, "PROJ-3", 413, streams[0])
+                    check(sum(row["path"] == USER_PATH for row in provider.audit) == lookups, "Oversized identity set reached the account endpoint.")
+                    before = work(alice, provider)
+
                     phase = "warnings and proposal-only agent writes"
                     provider.issues["alice", "PROJ-1"]["fields"]["description"] = {"type": "doc", "version": 1, "content": [
                         {"type": "paragraph", "content": [{"type": "text", "text": "Supported"}]},
@@ -111,7 +169,6 @@ def main():
                     check("jira_privacy" not in current and "jira_privacy" not in snapshot(alice, provider), "Private inventory leaked through the work API or viewer snapshot.")
                     privacy_captured_at = current["base_source"]["captured_at"]
                     check(current["base_source"].get("warnings") and "synthetic-no-download" in current["base"]["markdown"], "Unsupported ADF disappeared without a visible warning or fallback.")
-                    env = SimpleNamespace(base=base, trust=None, runtime=runtime)
                     result = tool(env, token(env), "submit_proposal", {"expected_revision": current["revision"], "candidate": {"label": "agent.md", "markdown": "# Agent\n"}})
                     check(not result.get("isError"), "Agent could not propose against Jira source.")
                     streams[0].revision(current["revision"] + 1)
@@ -167,14 +224,18 @@ def main():
                             streams[0].revision(current["revision"] + 1); after = work(alice, provider)
                             gate.release.set(); check(future.result()[0] == 409, "Late Jira capture overwrote a newer proposal.")
                             check(work(alice, provider) == after, "Late capture changed committed work.")
-                        with provider.pause(PATH) as gate:
+                        provider.issues["alice", "PROJ-1"]["fields"]["description"] = {"type": "doc", "version": 1, "content": [
+                            {"type": "paragraph", "content": [{"type": "mention", "attrs": {"id": "synthetic:lookup-person"}}]}]}
+                        with provider.pause(USER_PATH) as gate:
                             future = pool.submit(capture, alice, provider); check(gate.entered.wait(5), "Jira disconnect barrier missing.")
                             mutate(alice, provider, "jira-alpha", "", 1); gate.release.set()
                             check(future.result()[0] == 409 and work(alice, provider) == after, "Disconnected Jira credential committed an in-flight capture.")
                     streams[0].unchanged(); streams[1].unchanged()
                     before_bob = work(bob, provider)
+                    provider.issues["bob", "PROJ-1"]["fields"]["description"] = {"type": "doc", "version": 1, "content": [
+                        {"type": "paragraph", "content": [{"type": "mention", "attrs": {"id": "synthetic:lookup-person"}}]}]}
                     with ThreadPoolExecutor(max_workers=1) as pool:
-                        with provider.pause(PATH) as gate:
+                        with provider.pause(USER_PATH) as gate:
                             future = pool.submit(capture, bob, provider)
                             check(gate.entered.wait(5), "Jira logout barrier missing.")
                             check(request(bob, provider, "/auth/logout", "POST", {})[0] == 204, "Could not revoke the source reader session.")
@@ -193,9 +254,13 @@ def main():
                     copies = [json.loads(row[1]) for row in inventory_before]
                     mentioned = [item for item in copies if item["base"]["accounts"]]
                     check(len(mentioned) == 1 and mentioned[0]["base"]["accounts"] == {"synthetic:mentioned-person": privacy_captured_at}
-                          and mentioned[0]["candidate"]["accounts"] == mentioned[0]["base"]["accounts"]
+                          and mentioned[0]["candidate"]["accounts"] == {"synthetic:mentioned-person": privacy_captured_at,
+                                                                 "synthetic:lookup-person": lookup_times["alice"]}
                           and not mentioned[0]["base"]["unclassified"], "Structured Jira mention and derived proposal inventory did not persist privately with the retrieval time.")
-                with application(base, oidc, config, data):
+                    check(all(not item["candidate"]["accounts"] for item in copies if not item["base"]["accounts"]),
+                          "App account classification crossed the two owners or was reported as a person.")
+                    check(connection.execute("SELECT generation,revision_floor FROM privacy_guard").fetchone() == (0, 0), "Jira source test did not enable the external privacy barrier.")
+                with application(base, oidc, config, data, journal):
                     alice, bob = login(runtime, base)
                     check([work(alice, provider), work(bob, provider)] == expected, "Restart changed Jira conversion or private content.")
                 with closing(sqlite3.connect(data / "work.sqlite3")) as connection:
