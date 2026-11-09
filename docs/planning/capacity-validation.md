@@ -57,7 +57,7 @@ El documento grande tiene párrafos de unos 4 KiB, una marca sintética por prop
 | mddiff | Rust release, Linux arm64, UID/GID 10001, una CPU, 512 MiB, swap desactivado y 128 procesos. |
 | Host Docker medido | Docker Engine 29.5.2, VM aarch64 con dos CPU y 2 054 840 320 bytes de memoria; comparte recursos con otras cargas. |
 | Cliente y proxy | Python 3.13 en imagen oficial fijada por digest; HTTPS loopback con CA temporal verificada y backlog 64. Fuera del presupuesto de mddiff. |
-| IdP | Keycloak 26.8.1 sintético, HTTP loopback, una CPU, 768 MiB y heap JVM de 128–384 MiB. Fuera del presupuesto de mddiff. |
+| IdP | Keycloak 26.8.1 sintético, HTTP loopback, 1,5 CPU, 2 GiB y heap JVM de 256–1024 MiB. Fuera del presupuesto de mddiff. |
 | Fuente | Memos 0.31 simulado, credenciales personales diferentes y 50 ms de demora por GET. Solo acepta lecturas de negocio. |
 
 La cuota de CPU, RAM, swap y procesos se comprueba también en cgroups, no solo en los argumentos de Docker. `memory.peak` recoge el máximo del cgroup, incluidas memoria anónima, caché y estructuras contabilizadas por el kernel; no representa únicamente RSS. Se toma el máximo de la carga, rechazos y recuperación. Consulta [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) y [los límites de recursos de Docker](https://docs.docker.com/engine/containers/resource_constraints/).
@@ -132,3 +132,10 @@ GitHub Actions incorpora ambos recorridos Docker y conserva las regresiones del 
 Esta evidencia admite el perfil sintético descrito para diez sesiones; no certifica el cluster ni una exposición a internet. Antes de publicar deben cerrarse el origen HTTPS/IdP real, invitaciones, recuperación y respaldo de la clave/base/IdP, observabilidad y rollback de S14, y debe repetirse la comprobación con los recursos efectivos del host elegido.
 
 Las funciones pendientes de Jira, selección de fuentes y coordinación requieren ampliar y ejecutar sus escenarios cuando se implementen; no heredan una validación de una ruta inexistente. Google/GitHub permanece pendiente por decisión del usuario. No se ejecutó un pentest exhaustivo, una prueba de larga duración, diez navegadores renderizando a la vez ni carga sobre servicios o documentos reales.
+
+
+### Entorno de la prueba actual · 2026-11-09
+
+El IdP sintético usa los mismos límites de CPU y memoria configurados para la beta: 2 GiB, 1,5 CPU y heap de 256–1024 MiB. El visor conserva 512 MiB y una CPU. La prueba de diez usuarios requiere un host Docker con al menos 6 GiB para alojar además el cliente y el sistema; el runner rechaza un entorno menor antes de crear recursos. Un Mac con una VM Docker de 2 GiB agotó la memoria de Keycloak, mientras el contenedor del visor permaneció activo. Ese fallo del entorno no se considera una validación completa de capacidad.
+
+El informe registra los límites efectivos de identidad y el estado final de ambos contenedores, incluidos `OOMKilled` y el código de salida. Las cifras históricas anteriores corresponden a sus imágenes y entornos fechados.

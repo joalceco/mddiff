@@ -150,8 +150,8 @@ def main():
         private_write(DIRECTORY / "social.env", "# Reserved for a later social-login test; not consumed by this synthetic fixture.\nGOOGLE_CLIENT_ID=\nGOOGLE_CLIENT_SECRET=\nGITHUB_CLIENT_ID=\nGITHUB_CLIENT_SECRET=\n")
     subprocess.run([
         "docker", "run", "--detach", "--name", NAME, "--label", "mddiff.identity-spike=true",
-        "--publish", "127.0.0.1:8848:8080", "--memory", "768m", "--cpus", "1",
-        "--env", "JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m",
+        "--publish", "127.0.0.1:8848:8080", "--memory", "2g", "--cpus", "1.5",
+        "--env", "JAVA_OPTS_KC_HEAP=-Xms256m -Xmx1024m",
         "--env-file", str(env_file), IMAGE, "start-dev", "--hostname=" + BASE,
     ], check=True, stdout=subprocess.DEVNULL)
     deadline = time.monotonic() + 120

@@ -182,6 +182,9 @@ def main():
         audit_compose()
         print("Container check passed: Compose defaults and loopback override", flush=True)
         phase = "preflight"
+        if arguments.capacity:
+            available = json.loads(docker("info", "--format", "{{json .MemTotal}}").stdout)
+            check(available >= 6 * 1024 ** 3, "Ten-user capacity needs a Docker host with at least 6 GiB for Keycloak, the driver and the 512 MiB app.")
         runtime = load_runtime(fixture.RUNTIME)
         check(runtime["issuer"] == "http://localhost:8848/realms/mddiff-spike", "Only the synthetic Keycloak runtime is permitted.")
         owned = json.loads(docker("inspect", fixture.NAME).stdout)[0]
@@ -260,6 +263,8 @@ def main():
                 phase = "ten-user resource-limited workload"
                 report = {"users": 10, "memory_limit_bytes": 512 * 1024 * 1024, "cpu_limit": 1, "pids_limit": 128,
                           "image_id": tested_image, "profiles": [], "status": "running", "bootstrap": bootstrap["metrics"]}
+                idp = json.loads(docker("inspect", fixture.NAME).stdout)[0]
+                report["identity_limits"] = {"memory_bytes": idp["HostConfig"]["Memory"], "cpu_limit": idp["HostConfig"]["NanoCpus"] / 1e9}
                 output = ROOT / "target/capacity-report.json"
                 check(docker("exec", app, "cat", "/sys/fs/cgroup/memory.max").stdout.strip() == b"536870912"
                       and docker("exec", app, "cat", "/sys/fs/cgroup/memory.swap.max").stdout.strip() == b"0"
