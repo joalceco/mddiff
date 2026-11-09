@@ -22,9 +22,7 @@ Para admitir a una persona:
 4. Comprueba el cambio de contraseña y que el espacio nuevo esté vacío.
 5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE.
 
-Las conexiones personales se autorizan por separado. Habilitar un destino Memos no importa notas ni copia credenciales desde otro servicio. En la instalación del 2026-10-28, la lectura de Jira y Google/GitHub conservaron sus historias pendientes. [S09](agent-comparisons.md) registra el avance posterior de Jira; Google/GitHub sigue pendiente.
-
-Al 2026-10-29, Jira aún no tiene una lectura real verificada: falta configurar un secreto OAuth válido del operador. La cuenta propietaria puede probar la aplicación privada; autorizar otras cuentas requiere **Sharing**, que permanece deshabilitado por [#17](https://github.com/joalceco/mddiff/issues/17). La consola exige una atestación sobre Personal Data Reporting API para aplicaciones que almacenan datos personales y mddiff aún no implementa esa API. No se ha emitido esa atestación ni se considera resuelto el requisito mediante este runbook.
+El agente obtiene los documentos con sus propias herramientas y envía el par al visor. La aplicación no configura ni conserva credenciales de servicios documentales. Consulta [el contrato de comparación](agent-comparisons.md).
 
 ## Trabajo actual y siete copias diarias
 
@@ -38,7 +36,7 @@ La aplicación y Compose no programan backups por sí mismos. En la instalación
 4. Cifra la copia con restic, verifica el repositorio y solo entonces aplica `forget --keep-last 7 --group-by '' --prune` en el repositorio exclusivo de la beta.
 5. Publica resultado y fecha de éxito en las métricas. Un fallo no reemplaza la fecha del último respaldo correcto.
 
-El respaldo interrumpe brevemente las sesiones; después de reiniciar el visor se requiere autenticación. La contraseña de restic tiene una copia privada fuera del servidor y fuera del repositorio de respaldos. Perderla hace irrecuperables las copias. Se debe recuperar también la clave AES externa: conservar SQLite sin esa clave no recupera las credenciales de conexiones.
+El respaldo interrumpe brevemente las sesiones; después de reiniciar el visor se requiere autenticación. La contraseña de restic tiene una copia privada fuera del servidor y fuera del repositorio de respaldos. Perderla hace irrecuperables las copias. Las copias antiguas pueden conservar la configuración de conectores retirada; los respaldos nuevos de esquema 7 incluyen únicamente la configuración OIDC del visor y los archivos privados necesarios para su identidad y operación.
 
 El almacenamiento de respaldos está en otro disco del mismo host. Protege frente a la pérdida del volumen de aplicación, pero **no constituye una copia fuera del sitio ni una garantía ante la pérdida completa del host y sus discos**. La beta tiene una instancia; un fallo del nodo interrumpe el servicio.
 
@@ -52,7 +50,7 @@ El manifiesto de la entrega fija commit, identidad de imagen y esquema SQLite. A
 
 El ensayo del 2026-10-28 recuperó la imagen verificada tras un candidato que no arranca, con almacenamiento de esquema 3. No demostró un cambio entre esquemas. El ensayo del 2026-10-29 migró de 3 a 4, restauró únicamente la aplicación y su checkpoint compatible con 3 y repitió la migración a 4, preservando IdP y PostgreSQL. Esto no es una conversión de 4 a 3 en el mismo archivo ni admite reducir manualmente `user_version`.
 
-El binario anterior no puede abrir los datos migrados a 4. Restaurar un checkpoint vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones. Después de reabrir el servicio y aceptar escrituras públicas, no recuperes el checkpoint anterior como un rollback rutinario: perdería esas escrituras.
+Un binario anterior no debe abrir datos de un esquema posterior; la entrega vigente usa SQLite 7. Restaurar un checkpoint vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones. Después de reabrir el servicio y aceptar escrituras públicas, no recuperes el checkpoint anterior como un rollback rutinario: perdería esas escrituras.
 
 Un rollback limitado al visor debe conservar el IdP y su PostgreSQL vigentes. Restaurarlos desde una copia anterior podría revertir cambios de contraseña o sesiones que ocurrieron durante el mantenimiento de la aplicación. Una recuperación completa del IdP exige cerrar también sus escrituras y revisar esa consecuencia.
 
@@ -115,3 +113,20 @@ El primer ciclo manual verificó ocho checkpoints mediante recuperación protegi
 Sobre la imagen publicada, dos identidades nuevas completaron login y Codex OAuth/MCP por HTTPS, lectura del trabajo, propuestas privadas, SSE y rechazo de revisión obsoleta; una tercera sin invitación recibió rechazo. Pasaron también las sondas de salud, autenticación y administración. No se usaron turnos de modelo. Se borró el trabajo sintético mediante la API y se retiraron únicamente esas tres identidades.
 
 El timer de privacidad sigue sin instalar: habilitar futuras eliminaciones sin confirmación por caso requiere autorización separada. La recuperación protegida de checkpoints no sustituye la restauración completa en frío del respaldo nuevo, todavía pendiente. Sharing continúa deshabilitado. Consulta [el alcance actual y los pendientes](agent-comparisons.md).
+
+
+### Actualización del 2026-11-09
+
+La beta por invitación usa `d76c07f41efce8d92279f9c09e3cf94c7391aa4f` con SQLite 7. Se retiraron los conectores y su configuración: el agente envía ambos Markdown con `submit_comparison` o `PUT /api/work`. Se conservan Keycloak, espacios privados, entradas manuales, lector local y solo el último par persistente. Google/GitHub sigue aplazado. [#18](https://github.com/joalceco/mddiff/issues/18) sustituye los pendientes de conectores; #17 se cerró como no planificado por este cambio de alcance.
+
+La imagen Linux amd64 se construyó únicamente con archivos públicos auditados. La activación cerró el lector, detuvo el escritor y migró una copia separada sin red. Antes de promoverla se compararon las filas de documentos, propietarios, revisiones y metadatos de entrada; no cambiaron. Pasaron salud y checkpoint real por señal. Se preservaron OIDC y los contenedores de identidad durante la promoción. Los binarios anteriores no abren SQLite 7; no se reduce `user_version`.
+
+El respaldo cifrado nuevo pasó integridad y retención de siete copias. Su SQLite contiene únicamente `current_work`, y el directorio de secretos del visor contiene solo OIDC. No incorpora credenciales de conectores. Los respaldos anteriores pueden conservar datos y configuración hasta salir de la retención.
+
+Dos invitados nuevos completaron Codex real por OAuth y MCP sobre el HTTPS público: envío de ambos textos desde espacios vacíos, Unicode/CRLF exactos, coincidencia entre API/visor/SSE, aislamiento y rechazo de revisión obsoleta. Una cuenta sin rol recibió denegación; las API/MCP anónimas devolvieron `401` y la administración pública, `404`. Cero turnos de modelo. Se borraron los trabajos mediante la API autenticada y se retiraron las tres identidades de prueba.
+
+Se descifró el respaldo real y se probaron los helpers instalados de rollback de aplicación y restauración completa en un clon sin interfaces externas ni ruta por defecto. Pasaron filas exactas, ausencia de secretos de conectores, claves de firma y propietario del IdP preservados, y creación/retiro de invitados sintéticos. El rollback conservó los contenedores de identidad del clon. Se adaptaron exclusivamente las URLs y la política SSL de sus realms a loopback; este ensayo no prueba TLS público. El clon y los archivos temporales se retiraron; producción mantuvo su configuración y salud.
+
+Se retiraron la credencial exclusiva del operador, los ejecutores de privacidad no habilitados, las credenciales/configuración de conectores y las copias temporales previas. El bind antiguo no pudo desmontarse desde el contenedor sin privilegios; un respaldo final y un reinicio controlado completaron su retiro. El visor y el IdP recuperaron salud, y Codex repitió la prueba pública del par con identidades nuevas. Respaldo diario, renovación TLS y recolección de métricas siguen activos; aplicación, Keycloak y PostgreSQL conservaron sus límites y no presentaron OOM.
+
+El [CI de la imagen desplegada](https://github.com/joalceco/mddiff/actions/runs/42641193821) aprobó código y contenedor, incluida capacidad de diez usuarios. La comprobación de credenciales y datos privados se realiza antes de publicar documentación. La instalación, los secretos y los recibos completos permanecen en el runbook privado.

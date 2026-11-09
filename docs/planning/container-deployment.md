@@ -60,7 +60,7 @@ Los comandos de permisos siguientes corresponden a Docker Linux sin remapeo de u
 
    Edita la copia privada de OIDC con los valores del entorno. Conserva el ejemplo del repositorio sin secretos.
 
-4. Instala la configuración ya completadas con la propiedad y permisos que exige el proceso:
+4. Instala la configuración completada con la propiedad y permisos que exige el proceso:
 
    ```sh
    sudo install -m 0600 -o 10001 -g 10001 "$HOME/.config/mddiff-deploy/oidc.json" "$MDDIFF_SECRETS_DIR/oidc.json"

@@ -1,4 +1,4 @@
-# S06: propuestas por API y MCP con identidad de usuario
+# S06: comparaciones por API y MCP con identidad de usuario
 
 Fecha: 2026-10-27. Issue: [#7](https://github.com/joalceco/mddiff/issues/7). Rama: `feature/multiuser-sources`.
 
@@ -6,7 +6,7 @@ Este documento registra S06 con listener de loopback. [S12: contenedor alojado](
 
 ## Resultado y alcance
 
-Un agente autenticado puede leer el trabajo actual de su usuario y enviar una propuesta al mismo espacio que muestra el navegador. MCP y la API usan la identidad verificada `issuer` + `sub`, los mismos controles de revisión y la misma persistencia que la interfaz web. El visor recibe la nueva revisión por SSE.
+Un agente autenticado puede leer el trabajo actual de su usuario y enviar ambos documentos, o actualizar solo la propuesta, al mismo espacio que muestra el navegador. MCP y la API usan la identidad verificada `issuer` + `sub`, los mismos controles de revisión y la misma persistencia que la interfaz web. El visor recibe la nueva revisión por SSE.
 
 En hosted con configuración OIDC, `/mcp` utiliza Streamable HTTP con respuestas JSON y sin estado de sesión del transporte. Cada solicitud requiere un Bearer de usuario verificado mediante introspección. No se emiten ni se aceptan identificadores `Mcp-Session-Id`; esto no cambia la persistencia del trabajo en SQLite.
 

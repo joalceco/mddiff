@@ -14,7 +14,7 @@ El modo hosted conserva en SQLite el último original y su propuesta para cada i
 
 La propiedad del trabajo se determina mediante `issuer` + `sub`, verificados por la [autenticación web](hosted-auth.md). No se acepta un propietario elegido en el cuerpo, los headers o la query de la solicitud. El modo local continúa en memoria y mantiene sus contratos de archivos y MCP.
 
-Las sesiones web siguen siendo temporales: después de reiniciar mddiff hay que autenticarse de nuevo para recuperar el trabajo. La importación desde la interfaz pertenece al issue #6; el MCP alojado, al #7. Google/GitHub y el despliegue público siguen pendientes.
+Las sesiones web siguen siendo temporales: después de reiniciar mddiff hay que autenticarse de nuevo para recuperar el trabajo. La importación desde la interfaz pertenece al issue #6; el MCP alojado, al #7. La beta está publicada por invitación; Google/GitHub sigue pendiente. Consulta [la evidencia operativa](beta-operations.md).
 
 La historia se verificó el 2026-10-27 con una base temporal y usuarios sintéticos de Keycloak 26.8.1. La persistencia cubre reinicios del proceso; no constituye un backup del volumen.
 

@@ -2,6 +2,10 @@
 
 Alcance vigente desde 2026-11-05: se retiran todos los conectores y el agente envía ambos documentos. Consulta [la decisión y su contrato](agent-comparisons.md). Los apartados fechados anteriores conservan evidencia histórica; no describen conectores vigentes.
 
+La dirección vigente conserva Rust, Keycloak, espacios privados y solo el último par persistente. El agente envía ambos Markdown por API/MCP; el visor también permite texto y archivos. Google/GitHub sigue aplazado. [#18](https://github.com/joalceco/mddiff/issues/18) registra la simplificación y sus verificaciones.
+
+## Plan histórico del comité (sustituido)
+
 Fecha original: 2026-10-27. Estado de código y despliegue: 2026-10-29. Rama: `feature/multiuser-sources`.
 
 Estado: plan de producto y backlog de la rama de evolución. Conserva las decisiones originales del comité y registra los avances al final; no constituye por sí solo una verificación de despliegue, capacidad o interoperabilidad. [S12: contenedor alojado](container-deployment.md) documenta el empaquetado y sus límites; [S14](beta-operations.md) documenta la publicación por invitación y sus límites operativos.
