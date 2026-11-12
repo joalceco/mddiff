@@ -8,7 +8,7 @@ mddiff es una herramienta local para revisar documentos y propuestas de una IA. 
 
 El proyecto está en versión **0.1.0 / PMV**. La interfaz y los mensajes están en español. El modo local no requiere Node.js, una cuenta, claves de API ni un servicio de IA para funcionar. El modo alojado integra cuentas por invitación con Keycloak, espacios privados, recepción de ambos documentos por API/MCP remoto. Google/GitHub sigue pendiente.
 
-Estado al **2026-11-09**: la beta por invitación ejecuta `d76c07f` con SQLite 7, sin conectores. El agente envía las versiones previa y actual mediante `submit_comparison` o `PUT /api/work`; el visor compara automáticamente y conserva solo el último par de cada usuario. Pasaron el CI de código/contenedor, diez usuarios sintéticos y Codex real por HTTPS público. Consulta [el alcance vigente](docs/planning/agent-comparisons.md) y [la evidencia operativa](docs/planning/beta-operations.md#actualización-del-2026-11-09).
+Estado al **2026-11-12**: la beta por invitación ejecuta `ff66bd2` con SQLite 7, sin conectores. El agente envía ambos documentos mediante `submit_comparison` o `PUT /api/work` y crea un enlace de solo lectura con `create_review_link`: abre el diff durante una hora sin otro login. Se conserva únicamente el último par de cada usuario. Pasaron CI de código/contenedor, diez usuarios sintéticos, Codex real por HTTPS público y apertura en el navegador integrado. Consulta [el alcance vigente](docs/planning/agent-comparisons.md) y [la evidencia operativa](docs/planning/beta-operations.md#actualización-del-2026-11-12).
 
 **Ir a:** [Inicio rápido](#inicio-rápido) · [Contenedor](#ejecutar-hosted-en-un-contenedor) · [Uso](#usar-el-visor) · [MCP y Codex](#usar-desde-codex-con-mcp) · [API](#api-http) · [Privacidad](#privacidad-y-límites-de-confianza) · [Desarrollo](#desarrollo-y-pruebas) · [Rendimiento](#rendimiento) · [Problemas frecuentes](#problemas-frecuentes)
 
@@ -23,6 +23,7 @@ Estado al **2026-11-09**: la beta por invitación ejecuta `d76c07f` con SQLite 7
 | Entradas alojadas | Pegar texto o subir `.md` desde las cabeceras; apertura y comparación automáticas. |
 | Entrada | Texto, archivo, API o MCP y momento de recepción por lado. |
 | Integración | MCP/API local por rutas y MCP/API alojados con OAuth de usuario. |
+| Revisión temporal | El agente crea un enlace de solo lectura de una hora para abrir el par sin otro login. |
 | Actualización de la vista | SSE avisa al navegador cuando otra solicitud abre un documento o una comparación. |
 | Navegación | Botones y atajos `J` / `K` para recorrer los cambios. |
 | Tema | Oscuro de forma predeterminada, con selector de tema y preferencia guardada en el navegador. |
@@ -244,6 +245,10 @@ Configura un cliente público prerregistrado en Keycloak con PKCE `S256`, scope 
 
 El agente llama a `get_current_work` con `{}` y conserva la revisión recibida. Después llama a `submit_comparison` con `{expected_revision, base:{label, markdown}, candidate:{label, markdown}}`. `base` es la versión previa y `candidate` la actual. El par se confirma de forma atómica, incluso en un espacio vacío; el visor se actualiza por SSE y la respuesta incluye `viewer_url`. `submit_proposal` permite actualizar solo el segundo documento de un par existente. Si recibe `409`, debe detenerse y comunicar el conflicto.
 
+Después del envío, llama a `create_review_link` con `{expected_revision}` de la comparación confirmada. Devuelve `viewer_url`, `expires_at` (segundos Unix) y `expires_in_seconds: 3600`. Abre ese enlace en el navegador integrado. Si solo necesitas reabrir el par vigente, lee su revisión y crea el enlace sin reenviar contenido.
+
+El enlace permite a quien lo posea leer únicamente ese par, sin editar ni acceder a otras API. Caduca al cumplir una hora y también al reemplazar/borrar el trabajo o reiniciar el servidor. No lo publiques en notas, logs o repositorios. La vista conserva tema, Markdown/fuente y navegación entre cambios; comprueba su vigencia cada 15 segundos y retira el contenido si deja de estar disponible. No impide que quien ya lo leyó guarde una copia.
+
 MCP alojado no admite cookies de sesión, rutas, propietarios elegidos por el cliente ni un `Mcp-Session-Id`. Sus errores de operación devuelven `isError: true` con `structuredContent.status` y `error`. No mezcles Bearer y cookie ni envíes credenciales de otros servicios al visor. Consulta [el prompt de uso](docs/planning/remote-agents.md#prompt-de-uso).
 
 ## API HTTP
@@ -298,6 +303,8 @@ Los POST locales requieren `Content-Type: application/json` y rechazan campos de
 | `DELETE /api/work` | Borra ambos lados usando `{expected_revision}`; mantiene el contador incrementado. |
 
 Las mutaciones por sesión web requieren admisión, Origin exacto y su token CSRF. Los agentes pueden usar Bearer OAuth para GET, PUT y PATCH; DELETE con Bearer devuelve `403`. No se mezclan ambas credenciales. Las mutaciones devuelven un snapshot como `/api/state`; un conflicto de revisión devuelve `409` sin sobrescribir el trabajo. Un fallo de almacenamiento devuelve `503` y conserva el último estado publicado. Véase [el contrato para agentes](docs/planning/remote-agents.md#api-para-agentes).
+
+`POST /api/review-links` crea el mismo enlace con `{expected_revision}` y requiere Bearer OAuth o sesión web con Origin/CSRF. `GET /api/review` acepta exclusivamente la capacidad en `X-Mddiff-Review`, sin cookie ni Bearer. La vista `/review` obtiene esa capacidad del fragmento de su URL, que no se envía al servidor como ruta o query. Una capacidad inválida o caducada devuelve `410`. Consulta [el contrato del enlace temporal](docs/planning/remote-agents.md).
 
 La interfaz puede indicar `base_input` o `candidate_input` con `"text"`/`"file"` únicamente para el lado que importa. Estos campos son opcionales y se admiten en mutaciones con sesión web; no eligen propietario ni permiten enviar fechas. El servidor registra tipo y momento en el snapshot. Las entradas Bearer se identifican como API y `submit_proposal` como agente. Reemplazar un lado conserva los metadatos del otro cuando su documento no cambia.
 
@@ -447,9 +454,9 @@ La integración de la aplicación principal con un Keycloak sintético requiere 
 
 Con la fixture Keycloak iniciada, ejecuta también `python3 scripts/test_hosted_persistence.py` para comprobar recuperación tras terminar el proceso, aislamiento, borrado, conflictos y fallos de escritura. Después retira la fixture como indica la guía.
 
-GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`.
+GitHub Actions configura formato, análisis estático, pruebas Rust e integraciones de MCP local, separación de modos, autenticación y persistencia con Keycloak sintético. Las entradas manuales tienen una suite de navegador en `tests/browser` y el runner `scripts/test_hosted_imports.py`, que también verifica los enlaces temporales de solo lectura con `tests/browser/review-links.cjs`.
 
-La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos de la fixture](docs/planning/remote-agents.md#reproducir-la-verificación) y [la evidencia del cliente real por HTTPS público](docs/planning/beta-operations.md#actualización-del-2026-11-09).
+La integración alojada de API/MCP sobre HTTPS se reproduce con `python3 scripts/test_hosted_mcp.py` y, con Codex CLI instalado, `python3 scripts/test_codex_mcp.py`. Requieren la fixture Keycloak, el binario principal compilado y OpenSSL; el segundo runner utiliza OAuth y app-server real con cero turnos de modelo. GitHub Actions incorpora el primero. Consulta [los comandos de la fixture](docs/planning/remote-agents.md#reproducir-la-verificación) y [la evidencia del cliente real por HTTPS público](docs/planning/beta-operations.md#actualización-del-2026-11-12).
 
 La integración alojada utiliza Keycloak sintético. `python3 scripts/test_hosted_mcp.py` comprueba pares completos, bytes exactos, aislamiento y rechazo atómico. `python3 scripts/test_coordination.py` cubre eventos, pestañas y revisiones. Ejecuta secuencialmente las pruebas que comparten la fixture de identidad.
 
@@ -541,7 +548,7 @@ Estas cifras describen esos documentos y ese equipo. No son una garantía para r
 | No se puede guardar el trabajo | Comprueba permisos, espacio disponible y que una sola instancia use la base. Conserva el directorio de datos y no borres sus WAL/SHM para evitar el error. |
 | Una ruta relativa no se encuentra | Se resuelve respecto de `--root`, no respecto del navegador o del agente. |
 | Codex no encuentra `open_comparison` | Comprueba que mddiff esté iniciado, que `/mcp` use el mismo puerto y vuelve a conectar MCP o inicia una sesión nueva. |
-| Codex alojado no puede usar las herramientas | Revisa OAuth, admisión, scope, audiencia y callback exacto. En hosted las herramientas son `get_current_work` y `submit_proposal`; `open_comparison` pertenece al modo local. |
+| Codex alojado no puede usar las herramientas | Revisa OAuth, admisión, scope, audiencia y callback exacto. En hosted las herramientas son `get_current_work`, `submit_comparison`, `submit_proposal` y `create_review_link`; `open_comparison` pertenece al modo local. |
 | Una propuesta de agente devuelve `409` | Comprueba si falta original o cambió la revisión. Detén el envío y revisa el trabajo; no actualices automáticamente `expected_revision` para forzarlo. |
 | El documento cambió en disco y la vista sigue igual | Pulsa **Recargar** o repite la llamada de apertura. |
 | Aparece **Reconectando…** | Revisa el proceso del servidor. El navegador intentará reconectar; al reiniciar tendrás que abrir de nuevo los documentos si no los pasaste por CLI. |

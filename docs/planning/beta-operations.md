@@ -20,7 +20,7 @@ Para admitir a una persona:
 2. Asígnale el rol `mddiff-user` y verifica que el registro abierto permanece deshabilitado.
 3. Entrega el acceso por un canal privado autorizado; no guardes la contraseña en notas o issues.
 4. Comprueba el cambio de contraseña y que el espacio nuevo esté vacío.
-5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE.
+5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE. Los enlaces temporales ya emitidos son capacidades de lectura independientes: para invalidarlos antes de su vencimiento, cambia o borra el trabajo afectado, o reinicia el visor.
 
 El agente obtiene los documentos con sus propias herramientas y envía el par al visor. La aplicación no configura ni conserva credenciales de servicios documentales. Consulta [el contrato de comparación](agent-comparisons.md).
 
@@ -130,3 +130,19 @@ Se descifró el respaldo real y se probaron los helpers instalados de rollback d
 Se retiraron la credencial exclusiva del operador, los ejecutores de privacidad no habilitados, las credenciales/configuración de conectores y las copias temporales previas. El bind antiguo no pudo desmontarse desde el contenedor sin privilegios; un respaldo final y un reinicio controlado completaron su retiro. El visor y el IdP recuperaron salud, y Codex repitió la prueba pública del par con identidades nuevas. Respaldo diario, renovación TLS y recolección de métricas siguen activos; aplicación, Keycloak y PostgreSQL conservaron sus límites y no presentaron OOM.
 
 El [CI de la imagen desplegada](https://github.com/joalceco/mddiff/actions/runs/42641193821) aprobó código y contenedor, incluida capacidad de diez usuarios. La comprobación de credenciales y datos privados se realiza antes de publicar documentación. La instalación, los secretos y los recibos completos permanecen en el runbook privado.
+
+### Actualización del 2026-11-12
+
+La beta ejecuta `ff66bd2e10a38b2ebef7847089766f395ffb9763`, imagen Linux amd64 `sha256:0ea2db4067ce57eca5d8a5b0b1c4d06cb8aa8ef831b3adb65daafa7764dd0ee0`, con SQLite 7. [#19](https://github.com/joalceco/mddiff/issues/19) añade enlaces temporales de solo lectura por `create_review_link` y `POST /api/review-links`; el lector local conserva sus contratos.
+
+El agente autenticado crea el enlace para la revisión confirmada. Su vigencia máxima es de 3600 segundos y termina antes si se reemplaza/borra el trabajo o se reinicia el visor. El respaldo diario reinicia la aplicación, por lo que también invalida estos enlaces. La capacidad autoriza únicamente ese par y no permite editar, consultar otro propietario o usar las API/MCP protegidas. Retirar el rol del propietario no revoca por sí solo un enlace ya emitido: para retirarlo antes del vencimiento, cambia/borra su trabajo o reinicia el visor.
+
+El token aleatorio viaja en el fragmento de la URL y luego en un header exclusivo; no en ruta o query. El registro en memoria conserva solo su hash, identidad, revisión y plazo monotónico, sin otra copia de Markdown ni historial. Admite hasta 16 enlaces por usuario/revisión y 256 globales. Quien posea un enlace puede leer el par durante su vigencia y guardar lo que ya recibió; no se debe publicar fuera de la revisión solicitada.
+
+La activación cerró el lector bajo el bloqueo de respaldos, detuvo exclusivamente la aplicación y cambió su imagen sin migrar la base. Se compararon las filas y revisiones exactas antes y después, se verificó un checkpoint real por señal y se preservaron configuración OIDC y contenedores de identidad. Pasaron respaldos cifrados previos y posteriores, con siete copias verificadas antes de reabrir. El rollback de imagen compatible con esquema 7 quedó disponible; no se repitió la restauración completa del 2026-11-09 porque no cambiaron el esquema ni sus helpers.
+
+El [CI del código desplegado](https://github.com/joalceco/mddiff/actions/runs/43254954605) aprobó ambos jobs: 55 pruebas Rust, formato, Clippy, lector/MCP local, separación de modos, identidad, persistencia, navegador, API/MCP, coordinación y diez usuarios sintéticos. Incluye caducidad con reloj de prueba, cambio de capacidad en una pestaña existente, aislamiento, cuotas, rechazo de revisiones obsoletas y retiro automático del contenido. Docker local no pudo iniciar Keycloak por memoria insuficiente de la VM de 2 GiB; la validación completa usa el host de CI con capacidad suficiente.
+
+Codex real completó OAuth y MCP sobre el HTTPS público con dos invitados nuevos, emitió enlaces de 3600 segundos y comprobó lectura sin sesión, contenido exacto, ETag, rechazo de escritura y aislamiento. Cero turnos de modelo. El navegador integrado abrió un enlace sin login, mostró ambos documentos y retiró el contenido automáticamente tras el borrado autenticado. Se eliminaron ambos trabajos sintéticos y las tres identidades creadas para la prueba; no se reemplazaron documentos de cuentas existentes.
+
+La habilidad global, AGENTS y la guía local usan ahora `get_current_work` → `submit_comparison` → `create_review_link` → apertura del `viewer_url`. Reabrir el par vigente solo requiere lectura y creación del enlace. Se validaron la habilidad y la conservación de la configuración existente; los chats abiertos pueden necesitar una sesión nueva para descubrir la herramienta añadida. Los enlaces reales, credenciales y recibos permanecen fuera del repositorio. Google/GitHub continúa pendiente y el PR #16 permanece como borrador.
