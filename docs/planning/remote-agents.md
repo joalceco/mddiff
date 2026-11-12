@@ -10,7 +10,7 @@ Un agente autenticado puede leer el trabajo actual de su usuario y enviar ambos 
 
 En hosted con configuración OIDC, `/mcp` utiliza Streamable HTTP con respuestas JSON y sin estado de sesión del transporte. Cada solicitud requiere un Bearer de usuario verificado mediante introspección. No se emiten ni se aceptan identificadores `Mcp-Session-Id`; esto no cambia la persistencia del trabajo en SQLite.
 
-El MCP local conserva `open_comparison` y sus dos rutas de archivos. El MCP alojado ofrece `get_current_work`, `submit_comparison` y `submit_proposal`: recibe contenido y no abre rutas del host. No permite elegir otro propietario ni borrar el trabajo mediante una herramienta.
+El MCP local conserva `open_comparison` y sus dos rutas de archivos. El MCP alojado ofrece `get_current_work`, `submit_comparison`, `submit_proposal` y `create_review_link`: recibe contenido y no abre rutas del host. No permite elegir otro propietario ni borrar el trabajo mediante una herramienta.
 
 Google/GitHub sigue pendiente. Los conectores se retiraron por decisión del propietario; el agente obtiene y envía ambos documentos. Consulta [el alcance vigente](agent-comparisons.md).
 
@@ -120,6 +120,20 @@ En caso de éxito, devuelve la revisión nueva, `viewer_url`, etiquetas y contad
 
 El envío sustituye la propuesta anterior y conserva solo la vigente. Mantiene los límites de 2 MiB UTF-8 por documento, etiquetas de hasta 255 bytes y el margen JSON de 24 MiB + 16 KiB. Los errores conservan el último trabajo confirmado.
 
+### `create_review_link`
+
+Después de confirmar el par, crea un enlace de revisión sin otro login:
+
+```json
+{"expected_revision": 3}
+```
+
+Devuelve `viewer_url`, `expires_at` (segundos Unix) y `expires_in_seconds: 3600`. Abre ese `viewer_url` en el navegador integrado. El portal habitual sigue requiriendo la cuenta; este enlace concede únicamente lectura de la revisión seleccionada a quien lo posea.
+
+El enlace caduca tras una hora y deja de funcionar al sustituir o borrar el trabajo, o al reiniciar el servidor. No abre revisiones futuras ni concede escritura, borrado, acceso al MCP u otros documentos. No se conserva otra copia del Markdown ni un historial de comparaciones. Los enlaces se mantienen solo en memoria: hasta 16 por usuario para su revisión actual y 256 globales; un exceso devuelve `429`.
+
+La capacidad opaca viaja en el fragmento `#` de la URL, no en su query ni en un token OAuth. El navegador la envía mediante el header `X-Mddiff-Review` exclusivamente a `GET /api/review`, sin cookies. No publiques el enlace en issues, logs, repositorios o conversaciones ajenas a la revisión. La página ofrece lectura/diff, fuente, tema y navegación; oculta importación, cuenta y borrado. Comprueba su disponibilidad cada 15 segundos con ETag, sin descargar de nuevo una vista sin cambios; limpia el contenido al caducar o detectar invalidación. Una copia ya descargada no puede retirarse de manos de quien la leyó.
+
 ### Prompt de uso
 
 ```text
@@ -133,11 +147,13 @@ Usa el MCP mddiff_hosted para comparar dos documentos.
    expected_revision, base {label, markdown}, candidate {label, markdown}.
 4. Si recibes 409, detente e informa del conflicto. No cambies automáticamente
    la revisión para forzar la escritura. Un error conserva el par anterior.
-5. Si tiene éxito, abre viewer_url y resume los cambios.
+5. Si tiene éxito, llama a create_review_link con la revisión confirmada.
+   Abre el viewer_url temporal devuelto y resume los cambios. El enlace dura
+   una hora, es de solo lectura y no debe publicarse fuera de esta revisión.
 
 ```
 
-La apertura de `viewer_url` depende de las herramientas del cliente. El visor abierto se actualiza por SSE; abrir la URL no evita su login web. Leer y preparar una propuesta no da permiso para escribir en Jira o Memos.
+La apertura de `viewer_url` depende de las herramientas del cliente. El portal normal se actualiza por SSE y requiere login web. El enlace de `create_review_link` abre una revisión temporal de solo lectura sin ese login. Leer y preparar una propuesta no da permiso para escribir en Jira o Memos.
 
 ## API para agentes
 
@@ -148,6 +164,7 @@ Los clientes HTTP envían `Authorization: Bearer TOKEN_DE_USUARIO` por header, s
 | `GET /api/work` | Lee `revision`, `base` y `candidate`. |
 | `PUT /api/work` | Reemplaza el par completo con `{expected_revision, base, candidate}`. Puede preparar un original nuevo. |
 | `PATCH /api/work` | Recibe `{expected_revision, candidate}` y conserva el original, igual que `submit_proposal`. |
+| `POST /api/review-links` | Crea el enlace con `{expected_revision}`; admite Bearer personal o sesión web con Origin/CSRF. |
 | `DELETE /api/work` | Bearer recibe `403`. El borrado mediante sesión web y CSRF conserva su contrato. |
 
 PUT y PATCH devuelven el snapshot de la revisión confirmada y exigen revisión esperada. Para enviar una propuesta contra el original leído, utiliza PATCH. Los tres métodos de agente mantienen admisión, scope y audiencia; un token de comparación no permite entrar al SSE web ni a los endpoints de sesión.
@@ -198,7 +215,7 @@ Ambos runners terminaron correctamente contra el binario principal `release`. La
 | --- | --- |
 | TLS y discovery | Recurso y visor HTTPS, CA temporal de confianza explícita y rechazo del certificado cuando no se confía en ella. |
 | Identidad | Dos usuarios aislados; emisor, audiencia, scope, admisión, caducidad y credenciales ambiguas comprobados. |
-| Herramientas reales | Codex descubre `get_current_work`, `submit_comparison` y `submit_proposal` y publica una propuesta en el espacio de su identidad. |
+| Herramientas reales | Codex descubre `get_current_work`, `submit_comparison`, `submit_proposal` y `create_review_link` y publica una propuesta en el espacio de su identidad. |
 | Coincidencia entre clientes | API, MCP y visor observan el mismo par y revisión; SSE notifica únicamente al propietario correspondiente. |
 | Conflictos y capacidades | Revisión obsoleta rechazada, original conservado al enviar propuesta y borrado con Bearer denegado. |
 

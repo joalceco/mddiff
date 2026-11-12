@@ -47,7 +47,7 @@ def connect(resources, env, name):
     inventory = client.request("mcpServerStatus/list", {"threadId": thread_id, "serverName": SERVER, "detail": "toolsAndAuthOnly"})
     servers = [server for server in inventory["data"] if server["name"] == SERVER]
     check(len(servers) == 1 and servers[0]["authStatus"] == "oAuth", "Real Codex did not authenticate its hosted MCP server.")
-    check(set(servers[0]["tools"]) == {"get_current_work", "submit_comparison", "submit_proposal"}, "Real Codex discovered an incorrect hosted tool inventory.")
+    check(set(servers[0]["tools"]) == {"get_current_work", "submit_comparison", "submit_proposal", "create_review_link"}, "Real Codex discovered an incorrect hosted tool inventory.")
     return client, thread_id
 
 
@@ -93,6 +93,15 @@ def main():
                 check(snapshot["revision"] == 1 and not snapshot["comparison"]["source_equal"] and snapshot["comparison"]["rows"], "The viewer did not render the Codex comparison.")
                 stale = call(session["client"], session["thread_id"], "submit_comparison", {"expected_revision": 0, "base": session["original"], "candidate": session["proposal"]})
                 check(stale.get("isError") and stale["structuredContent"]["status"] == 409, "Real Codex overwrote a newer revision.")
+                link = call(session["client"], session["thread_id"], "create_review_link", {"expected_revision": 1})
+                check(not link.get("isError") and link["structuredContent"]["expires_in_seconds"] == 3600,
+                      "Real Codex could not create a one-hour review link.")
+                from urllib.parse import urlsplit
+                capability = urlsplit(link["structuredContent"]["viewer_url"])
+                check(capability.path == "/review" and bool(capability.fragment), "Real Codex received an invalid review URL.")
+                status, raw, _ = http(env, "/api/review", headers={"X-Mddiff-Review": capability.fragment})
+                check(status == 200 and json.loads(raw)["revision"] == 1,
+                      "The Codex review link requires a browser login or reads another revision.")
                 streams[index].unchanged()
         print("Real Codex MCP: verified resource HTTPS/custom CA, OAuth PKCE, two private accounts, atomic document pairs/SSE/viewer agreement and stale-write rejection passed; model turns: 0.")
     except (CheckFailed, ProbeError) as error:

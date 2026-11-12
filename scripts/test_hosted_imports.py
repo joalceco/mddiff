@@ -37,6 +37,8 @@ def main():
                     environment.pop(name, None)
                 completed = subprocess.run(["node", str(ROOT / "tests/browser/hosted-imports.cjs")], env=environment, cwd=ROOT)
                 check(completed.returncode == 0, "Browser imports integration failed.")
+                review = subprocess.run(["node", str(ROOT / "tests/browser/review-links.cjs")], env=environment, cwd=ROOT)
+                check(review.returncode == 0, "Read-only review browser integration failed.")
         print("Main hosted browser imports passed with synthetic data; Google/GitHub remain deferred.")
     except CheckFailed as error:
         raise SystemExit(str(error)) from None

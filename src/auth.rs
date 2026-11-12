@@ -319,7 +319,7 @@ impl Authenticator {
         }
         let navigation = method == Method::GET
             && (matches!(path, "/auth/login" | "/auth/callback")
-                || (path == "/"
+                || (matches!(path, "/" | "/review")
                     && headers
                         .get("sec-fetch-mode")
                         .is_some_and(|v| v == "navigate")
@@ -594,7 +594,12 @@ pub async fn authenticate(
         return next.run(request).await;
     };
     let path = request.uri().path().to_owned();
-    if crate::is_health_request(request.method(), &path)
+    if (matches!(*request.method(), Method::GET | Method::HEAD)
+        && matches!(
+            path.as_str(),
+            "/review" | "/api/review" | "/app.js" | "/style.css"
+        ))
+        || crate::is_health_request(request.method(), &path)
         || matches!(
             path.as_str(),
             "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp"
@@ -603,7 +608,8 @@ pub async fn authenticate(
         return next.run(request).await;
     }
     if request.headers().contains_key(header::AUTHORIZATION) {
-        if !matches!(path.as_str(), "/mcp" | "/api/work")
+        if !matches!(path.as_str(), "/mcp" | "/api/work" | "/api/review-links")
+            || (path == "/api/review-links" && request.method() != Method::POST)
             || (path == "/api/work"
                 && !matches!(
                     *request.method(),
@@ -1213,6 +1219,7 @@ mod tests {
             port: 3847,
             mode: crate::Mode::Hosted(Workspaces::persistent(&directory).unwrap()),
             auth: Some(Arc::new(authenticator(config()))),
+            review: Arc::default(),
         });
         for method in [Method::GET, Method::HEAD] {
             for (host, origin) in [
@@ -1305,6 +1312,7 @@ mod tests {
             port: 3847,
             mode: crate::Mode::Hosted(Workspaces::default()),
             auth: Some(Arc::new(authenticator(config()))),
+            review: Arc::default(),
         });
         let response = crate::router(missing_storage)
             .oneshot(
@@ -1378,6 +1386,7 @@ mod tests {
             port: 3848,
             mode: crate::Mode::Hosted(Workspaces::default()),
             auth: Some(auth.clone()),
+            review: Arc::default(),
         });
         let alice = auth
             .local_session(&SessionHandle("alice".into()))
@@ -1418,5 +1427,194 @@ mod tests {
             }
         }
         provider.abort();
+    }
+    #[tokio::test]
+    async fn review_capabilities_only_read_the_granted_revision_without_a_web_session() {
+        use axum::body::{Body, to_bytes};
+        use mddiff::workspace::{Document, Workspaces};
+        use tower::ServiceExt;
+        let app = Arc::new(App {
+            port: 3848,
+            mode: crate::Mode::Hosted(Workspaces::default()),
+            auth: Some(Arc::new(authenticator(config()))),
+            review: Arc::default(),
+        });
+        let alice =
+            VerifiedIdentity::from_verified_claims("https://id.example".into(), "alice".into())
+                .unwrap();
+        let bob = VerifiedIdentity::from_verified_claims("https://id.example".into(), "bob".into())
+            .unwrap();
+        let workspace = app
+            .workspace(Some(axum::Extension(alice.clone())))
+            .await
+            .unwrap();
+        let other = app
+            .workspace(Some(axum::Extension(bob.clone())))
+            .await
+            .unwrap();
+        for (work, text) in [(&workspace, "# Only Alice"), (&other, "# Only Bob")] {
+            work.replace_if_revision(
+                0,
+                Document {
+                    label: "previo.md".into(),
+                    markdown: text.into(),
+                },
+                Some(Document {
+                    label: "actual.md".into(),
+                    markdown: format!("{text} changed"),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let link = crate::review::create(
+            &app.review,
+            &workspace,
+            alice.clone(),
+            1,
+            "https://viewer.example",
+        )
+        .await
+        .unwrap();
+        let bob_link = crate::review::create(&app.review, &other, bob, 1, "https://viewer.example")
+            .await
+            .unwrap();
+        let token = link.viewer_url.split_once('#').unwrap().1;
+        let get = |path: &str, token: &str| {
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "viewer.example")
+                .header("x-mddiff-review", token)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for path in ["/review", "/app.js", "/style.css"] {
+            let response = crate::router(app.clone())
+                .oneshot(get(path, ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = crate::router(app.clone())
+            .oneshot(get("/api/review?owner_id=bob", token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        let etag = response.headers()[header::ETAG].clone();
+        let raw = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(raw.to_vec()).unwrap();
+        assert!(body.contains("Only Alice") && !body.contains("Only Bob") && !body.contains(token));
+        let mut conditional = get("/api/review", token);
+        conditional
+            .headers_mut()
+            .insert(header::IF_NONE_MATCH, etag.clone());
+        let response = crate::router(app.clone())
+            .oneshot(conditional)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for path in ["/api/work", "/api/state", "/api/events", "/auth/session"] {
+            assert_eq!(
+                crate::router(app.clone())
+                    .oneshot(get(path, token))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for path in ["/api/work", "/api/review-links", "/mcp"] {
+            let mut req = get(path, token);
+            *req.method_mut() = Method::POST;
+            req.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            assert_eq!(
+                crate::router(app.clone())
+                    .oneshot(req)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for invalid in ["", "not-a-token", &"x".repeat(43)] {
+            assert_eq!(
+                crate::router(app.clone())
+                    .oneshot(get("/api/review", invalid))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::GONE
+            );
+        }
+        let mut duplicate = get("/api/review", token);
+        duplicate
+            .headers_mut()
+            .append("x-mddiff-review", HeaderValue::from_str(token).unwrap());
+        assert_eq!(
+            crate::router(app.clone())
+                .oneshot(duplicate)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::GONE
+        );
+        workspace
+            .propose_if_revision(
+                1,
+                Document {
+                    label: "next.md".into(),
+                    markdown: "# New revision".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut stale = get("/api/review", token);
+        stale.headers_mut().insert(header::IF_NONE_MATCH, etag);
+        assert_eq!(
+            crate::router(app.clone())
+                .oneshot(stale)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::GONE
+        );
+        let new_link =
+            crate::review::create(&app.review, &workspace, alice, 2, "https://viewer.example")
+                .await
+                .unwrap();
+        workspace.clear_if_revision(2).await.unwrap();
+        assert_eq!(
+            crate::router(app.clone())
+                .oneshot(get(
+                    "/api/review",
+                    new_link.viewer_url.split_once('#').unwrap().1
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            crate::router(app)
+                .oneshot(get(
+                    "/api/review",
+                    bob_link.viewer_url.split_once('#').unwrap().1
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
     }
 }

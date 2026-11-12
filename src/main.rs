@@ -1,5 +1,6 @@
 mod auth;
 mod mcp;
+mod review;
 
 use axum::{
     Extension, Json, Router,
@@ -40,6 +41,7 @@ struct App {
     port: u16,
     mode: Mode,
     auth: Option<Arc<auth::Authenticator>>,
+    review: Arc<review::Links>,
 }
 
 impl App {
@@ -184,7 +186,10 @@ async fn quotas(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    let protected_content = matches!(path, "/api/work" | "/api/state" | "/api/events" | "/mcp");
+    let protected_content = matches!(
+        path,
+        "/api/work" | "/api/state" | "/api/events" | "/api/review-links" | "/mcp"
+    );
     let permits = match (&app.mode, request.extensions().get::<VerifiedIdentity>()) {
         (Mode::Hosted(store), Some(identity)) if protected_content => {
             let kind = if path == "/api/events" {
@@ -208,6 +213,10 @@ async fn quotas(
     let permits: RequestCapacity = Arc::new(permits);
     request.extensions_mut().insert(Arc::clone(&permits));
     let response = next.run(request).await;
+    retain_capacity(response, permits)
+}
+
+fn retain_capacity(response: Response, permits: RequestCapacity) -> Response {
     response.map(|body| {
         axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
             let _keep_capacity = &permits;
@@ -478,6 +487,12 @@ fn router(app: Arc<App>) -> Router {
     };
     let router = if app.auth.is_some() {
         router
+            .route(
+                "/review",
+                get(|| async { Html(include_str!("../web/index.html")) }),
+            )
+            .route("/api/review", get(review::read))
+            .route("/api/review-links", post(review::create_link))
             .merge(auth::routes())
             .route("/mcp", axum::routing::any(mcp::hosted_service))
             .layer(middleware::from_fn_with_state(Arc::clone(&app), quotas))
@@ -673,7 +688,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let listener = tokio::net::TcpListener::bind((arguments.bind, arguments.port)).await?;
     let port = listener.local_addr()?.port();
-    let app = Arc::new(App { mode, port, auth });
+    let app = Arc::new(App {
+        mode,
+        port,
+        auth,
+        review: Arc::default(),
+    });
     if let [base, candidate] = arguments.documents.as_slice() {
         app.local_reader()?
             .open(base.clone(), Some(candidate.clone()))
@@ -759,6 +779,7 @@ mod tests {
             port: 3847,
             mode: Mode::Hosted(Workspaces::default()),
             auth: None,
+            review: Arc::default(),
         });
         assert!(app.local_reader().is_err());
         for path in ["/api/state?owner_id=alice", "/api/events?owner_id=alice"] {
@@ -958,6 +979,7 @@ mod tests {
                 port: 3847,
                 mode,
                 auth: None,
+                review: Arc::default(),
             });
             for method in [Method::GET, Method::HEAD] {
                 let response = router(Arc::clone(&app))

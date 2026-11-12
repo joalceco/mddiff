@@ -82,6 +82,35 @@ def main():
             committed = current(env, agent)
             check(committed["base"] == previous and committed["candidate"] == actual,
                   "Pair submission changed Markdown bytes or omitted a document.")
+            phase = "temporary read-only review capability"
+            review = tool(env, agent, "create_review_link", {"expected_revision": 1})
+            check(not review.get("isError"), "MCP could not issue a review link.")
+            link = review["structuredContent"]; parsed = urlsplit(link["viewer_url"])
+            check(parsed.path == "/review" and not parsed.query and len(parsed.fragment) == 43,
+                  "Review capability did not use an opaque fragment.")
+            check(link["expires_in_seconds"] == 3600 and abs(link["expires_at"] - time.time() - 3600) < 5,
+                  "Review link does not expire in one hour.")
+            review_headers = {"X-Mddiff-Review": parsed.fragment}
+            status, raw, response_headers = http(env, "/api/review", headers=review_headers)
+            check(status == 200 and json.loads(raw)["revision"] == 1 and "日本語" in raw.decode(),
+                  "A fresh browser could not read the granted pair without a session.")
+            check(response_headers.get("Cache-Control") == "no-store" and response_headers.get("Referrer-Policy") == "no-referrer",
+                  "Review response weakened cache/referrer protection.")
+            check(http(env, "/api/review", headers={**review_headers, "If-None-Match": response_headers["ETag"]})[0] == 304,
+                  "An unchanged review resent the document.")
+            check(http(env, "/review")[0] == 200 and http(env, "/app.js")[0] == 200,
+                  "The read-only viewer requires an unrelated login.")
+            check(http(env, "/api/review")[0] == 410 and http(env, "/api/work", headers=review_headers)[0] == 401,
+                  "Review capability leaked into ordinary authenticated APIs.")
+            check(http(env, "/api/work", pair, method="PUT", headers=review_headers)[0] == 401,
+                  "Review capability could overwrite work.")
+            created = http(env, "/api/review-links", {"expected_revision": 1}, agent, "POST")
+            check(created[0] == 200 and json.loads(created[1])["expires_in_seconds"] == 3600,
+                  "The authenticated API could not create a review link.")
+            check(http(env, "/api/review-links", {"expected_revision": 0}, agent, "POST")[0] == 409,
+                  "Review creation ignored its expected revision.")
+            check(http(env, "/api/review-links", {"expected_revision": 1, "owner_id": "bob"}, agent, "POST")[0] == 422,
+                  "Review creation accepted another owner.")
             check(current(env, alice)["revision"] == current(env, bob)["revision"] == 0,
                   "Pair submission changed another user's workspace.")
             stale = tool(env, agent, "submit_comparison", pair)
@@ -94,6 +123,9 @@ def main():
             check(http(env, "/api/work", {**pair, "expected_revision": 1}, agent, "PUT")[0] == 200
                   and current(env, agent)["revision"] == 2, "Bearer API could not submit both documents.")
 
+            check(http(env, "/api/review", headers=review_headers)[0] == 410,
+                  "An old review exposed a replacement revision.")
+
             phase = "web-owned originals and stateless MCP"
             browsers = [TlsBrowser(env.base, env.runtime["issuer"], env.trust) for _ in range(2)]
             originals = []
@@ -104,7 +136,7 @@ def main():
             initialized = rpc(env, alice, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "mddiff-main-test", "version": "1"}})
             check(initialized["result"]["serverInfo"]["name"] == "mddiff-hosted", "MCP initialization returned a different server.")
             tools = rpc(env, alice, "tools/list")["result"]["tools"]
-            check({item["name"] for item in tools} == {"get_current_work", "submit_comparison", "submit_proposal"}, "Hosted tools include a path opener or omit a required tool.")
+            check({item["name"] for item in tools} == {"get_current_work", "submit_comparison", "submit_proposal", "create_review_link"}, "Hosted tools include a path opener or omit a required tool.")
             check(all(not item["inputSchema"].get("additionalProperties", True) for item in tools), "A hosted tool accepts unspecified top-level arguments.")
             proposals = [{"label": "Propuesta sintética.md", "markdown": f"# Propuesta privada de {name}\r\n\r\nUnicode: 🌲.\r\n"} for name in ("alice", "bob")]
             for index, access in enumerate((alice, bob)):
@@ -136,6 +168,8 @@ def main():
             check(http(env, "/api/work", {"expected_revision": 3, "candidate": candidate, "base": originals[1]}, alice, "PATCH")[0] == 422, "PATCH allowed original replacement through extra fields.")
             for name, arguments in [
                 ("get_current_work", {"owner_id": "bob"}),
+                ("create_review_link", {"expected_revision": 3, "owner_id": "bob"}),
+                ("create_review_link", {"expected_revision": 3, "expires_in_seconds": 86400}),
                 ("submit_proposal", {"expected_revision": 3, "candidate": candidate, "owner_id": "bob"}),
                 ("submit_proposal", {"expected_revision": 3, "candidate": {**candidate, "path": "/never-open/private.md"}}),
             ]:

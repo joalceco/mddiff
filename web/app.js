@@ -25,6 +25,13 @@ let inputVersion = 0;
 let pathsDirty = false;
 let authentication = null;
 let hosted = false;
+const reviewMode = window.location.pathname === "/review";
+const reviewToken = reviewMode ? window.location.hash.slice(1) : null;
+let reviewStopped = false;
+let reviewBusy = false;
+let reviewEtag = null;
+let reviewPoll = null;
+let reviewExpiry = null;
 let events = null;
 let reconnectTimer = null;
 let textDraft = null;
@@ -418,7 +425,7 @@ function render() {
   $("document-view").hidden = !hasDocument;
   $("delete-work").hidden = !hosted || !authentication || !hasDocument;
   if (hosted) {
-    $("pane-headers").hidden = !authentication;
+    $("pane-headers").hidden = !(authentication || (reviewMode && !reviewStopped && session));
     $("base-path").hidden = $("candidate-path").hidden = true;
   }
   for (const side of ["base", "candidate"]) {
@@ -539,7 +546,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 function hostedView(title, description) {
-  $("pane-headers").hidden = !authentication;
+  $("pane-headers").hidden = !(authentication || (reviewMode && !reviewStopped && session));
   $("reload-button").hidden = true;
   $("example-button").hidden = true;
   $("empty").querySelector("ol").hidden = true;
@@ -628,8 +635,74 @@ $("logout-button").addEventListener("click", async () => {
   finally { $("logout-button").disabled = false; }
 });
 window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); });
+window.addEventListener("hashchange", () => { if (reviewMode) window.location.reload(); });
+document.addEventListener("click", (event) => {
+  const fragment = event.target.closest("a")?.getAttribute("href");
+  if (!reviewMode || !fragment?.startsWith("#")) return;
+  event.preventDefault();
+  try { document.getElementById(decodeURIComponent(fragment.slice(1)))?.scrollIntoView(); } catch {}
+});
+
+
+function endReview() {
+  reviewStopped = true;
+  clearTimeout(reviewPoll);
+  clearTimeout(reviewExpiry);
+  session = null;
+  acceptedRevision = -1;
+  changes = [];
+  $("rows").replaceChildren();
+  $("base-path").value = $("candidate-path").value = "";
+  render();
+  hostedView("Enlace no disponible", "El enlace caducó o dejó de estar disponible. Pide otro al agente.");
+  $("connection").textContent = "Enlace finalizado";
+  $("connection").classList.remove("connected");
+  $("document-status").textContent = "La revisión temporal ya no está disponible.";
+}
+
+async function refreshReview() {
+  if (reviewBusy || reviewStopped) return;
+  reviewBusy = true;
+  clearTimeout(reviewPoll);
+  try {
+    const response = await fetch("/api/review", {
+      credentials: "omit", cache: "no-store", redirect: "error",
+      headers: { "X-Mddiff-Review": reviewToken, ...(reviewEtag ? { "If-None-Match": reviewEtag } : {}) },
+    });
+    if (reviewStopped) return;
+    if (!response.ok && response.status !== 304) { endReview(); return; }
+    const remaining = Number(response.headers.get("x-mddiff-review-remaining"));
+    if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 3600) { endReview(); return; }
+    clearTimeout(reviewExpiry);
+    reviewExpiry = setTimeout(endReview, remaining * 1000);
+    if (response.status !== 304) {
+      const snapshot = await response.json();
+      if (reviewStopped) return;
+      reviewEtag = response.headers.get("ETag");
+      applySession(snapshot);
+    }
+    $("pane-headers").hidden = false;
+    $("connection").textContent = "Revisión temporal · solo lectura";
+    $("connection").classList.add("connected");
+    $("document-status").textContent = "Este enlace no permite editar ni borrar el trabajo.";
+    reviewPoll = setTimeout(refreshReview, 15000);
+  } catch { endReview(); }
+  finally { reviewBusy = false; }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (reviewMode && document.visibilityState === "visible") refreshReview();
+});
 
 async function start() {
+  if (reviewMode) {
+    hosted = true;
+    hostedView("Revisión temporal", "Abriendo el documento…");
+    $("login-button").hidden = $("logout-button").hidden = true;
+    if (!/^[A-Za-z0-9_-]{43}$/.test(reviewToken)) { endReview(); return; }
+    await refreshReview();
+    return;
+  }
   try {
     const response = await fetch("/auth/session");
     if (response.status === 404) { connectEvents(); return; }

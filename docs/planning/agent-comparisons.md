@@ -8,7 +8,7 @@ El agente obtiene los documentos mediante sus propias herramientas y envía al v
 
 1. Llama a `get_current_work` para obtener `revision`, incluso en un espacio vacío.
 2. Llama a `submit_comparison` con `expected_revision`, `base: {label, markdown}` y `candidate: {label, markdown}`. `base` es la versión previa y `candidate` la actual.
-3. Muestra `viewer_url`. El navegador de esa identidad recibe la actualización mediante SSE.
+3. Para una revisión directa en el navegador, llama a `create_review_link` con la revisión confirmada y abre su `viewer_url`: solo lectura, una hora y válido únicamente mientras ese par siga vigente. Sustituir/borrar el trabajo o reiniciar el servidor lo invalida. El portal con login conserva SSE.
 
 Cada documento admite hasta 2 MiB UTF-8 y los límites existentes de complejidad. El par se confirma en una sola transacción. Si un documento es inválido o la revisión cambió, se conserva el par anterior. Un conflicto requiere volver a leer y decidir; el agente no debe forzar una revisión nueva automáticamente. No se aceptan rutas del servidor ni un propietario elegido por el cliente.
 
