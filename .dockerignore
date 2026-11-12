@@ -1,0 +1,12 @@
+**
+!Cargo.toml
+!Cargo.lock
+!Dockerfile
+!src/
+src/**
+!src/**/*.rs
+!web/
+web/**
+!web/index.html
+!web/app.js
+!web/style.css

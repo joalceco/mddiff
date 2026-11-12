@@ -231,17 +231,51 @@ fn sanitizer() -> ammonia::Builder<'static> {
     sanitizer
 }
 
+const MARKDOWN_OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS);
+
+pub(crate) fn within_hosted_complexity(markdown: &str) -> bool {
+    let bytes = markdown.as_bytes();
+    let breaks = bytes
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| **b == b'\n' || (**b == b'\r' && bytes.get(i + 1) != Some(&b'\n')))
+        .take(10_001)
+        .count();
+    let final_line = usize::from(bytes.last().is_some_and(|b| !matches!(*b, b'\r' | b'\n')));
+    if breaks + final_line > 10_000 {
+        return false;
+    }
+    let (mut depth, mut html_tags) = (0usize, 0usize);
+    for (index, event) in Parser::new_ext(markdown, MARKDOWN_OPTIONS).enumerate() {
+        if index >= 32_768 {
+            return false;
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Html(value) | Event::InlineHtml(value) => {
+                html_tags += value.bytes().filter(|b| *b == b'<').take(257).count();
+            }
+            _ => {}
+        }
+        if depth > 128 || html_tags > 256 {
+            return false;
+        }
+    }
+    true
+}
+
 fn blocks(markdown: &str) -> Vec<Block> {
     // shortcut: align complete top-level blocks; add nested alignment if structural edits need finer pairing.
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let sanitizer = sanitizer();
     let mut rendered = Vec::new();
     let mut events = Vec::new();
     let mut depth = 0;
     let mut block_start = 0;
     // Parse the whole document so references resolve before events are split into blocks.
-    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(markdown, MARKDOWN_OPTIONS).into_offset_iter() {
         if depth == 0 {
             block_start = range.start;
         }

@@ -1,0 +1,148 @@
+# S14: operar la beta por invitación
+
+Alcance vigente desde 2026-11-05: se retiran todos los conectores y el agente envía ambos documentos. Consulta [la decisión y su contrato](agent-comparisons.md). Los apartados fechados anteriores conservan evidencia histórica; no describen conectores vigentes.
+
+Issue: [#15](https://github.com/joalceco/mddiff/issues/15). Rama: `feature/multiuser-sources`.
+
+Esta guía describe la operación de una instancia alojada y sus límites. El runbook de la instalación, sus dominios, direcciones, accesos y archivos privados se conservan fuera del repositorio. Los comandos de las guías públicas utilizan ejemplos; no constituyen un instalador del cluster.
+
+## Arquitectura y admisión
+
+La beta ejecuta una instancia Rust con SQLite en disco local, Keycloak en modo de producción con PostgreSQL y un proxy HTTPS. El túnel verifica el certificado del origen con una CA privada; no se desactiva la validación TLS. El proxy presenta únicamente el visor, sus endpoints y las rutas de autenticación necesarias. La administración del IdP, su realm administrativo, PostgreSQL, métricas del IdP y puertos de la aplicación permanecen fuera del acceso público. Un filtro de entrada dentro del guest restringe el proxy y el exporter a sus consumidores; no depende de habilitar el firewall global del cluster.
+
+El entorno de aplicación usa un contenedor de sistema sin privilegios, dos CPU y 4 GiB de RAM. mddiff conserva el límite de 512 MiB y una CPU de [S12](container-deployment.md); Keycloak tiene 2 GiB y PostgreSQL, 512 MiB. Estos límites dejan margen al sistema operativo y al proxy. El disco de trabajo es local; los respaldos usan otro disco. Una reserva virtual de disco no garantiza espacio físico: hay que observar también el almacenamiento del host.
+
+Los invitados reciben una cuenta creada por administración, con contraseña temporal y cambio obligatorio en el primer acceso. No hay autorregistro. La cuenta debe tener el rol `mddiff-user`; una contraseña válida sin ese rol no permite leer el trabajo. No se envían invitaciones por correo automáticamente ni se presupone un servidor SMTP. Google/GitHub sigue pendiente.
+
+Para admitir a una persona:
+
+1. Crea su usuario desde el acceso privado de administración, con una contraseña temporal única.
+2. Asígnale el rol `mddiff-user` y verifica que el registro abierto permanece deshabilitado.
+3. Entrega el acceso por un canal privado autorizado; no guardes la contraseña en notas o issues.
+4. Comprueba el cambio de contraseña y que el espacio nuevo esté vacío.
+5. Para revocar acceso, deshabilita la cuenta o retira el rol y cierra sus sesiones. La aplicación vuelve a comprobar la identidad en solicitudes protegidas y SSE. Los enlaces temporales ya emitidos son capacidades de lectura independientes: para invalidarlos antes de su vencimiento, cambia o borra el trabajo afectado, o reinicia el visor.
+
+El agente obtiene los documentos con sus propias herramientas y envía el par al visor. La aplicación no configura ni conserva credenciales de servicios documentales. Consulta [el contrato de comparación](agent-comparisons.md).
+
+## Trabajo actual y siete copias diarias
+
+La aplicación mantiene únicamente el último original y la última propuesta por persona. **La instalación beta conserva hasta siete copias diarias exitosas cifradas.** Una copia puede recuperar documentos reemplazados o borrados después de su captura; borrar el trabajo actual no elimina de inmediato esas copias. El timer crea una copia al día; una ejecución manual también ocupa uno de los siete lugares. Si se omiten días por un fallo, una copia recuperable puede tener más de siete días.
+
+La aplicación y Compose no programan backups por sí mismos. En la instalación se configura un timer externo, con esta secuencia:
+
+1. Activa mantenimiento y detén las escrituras del visor y del IdP.
+2. Crea una copia consistente de SQLite mediante su API de backup y un `pg_dump` de Keycloak; conserva configuraciones, claves externas, certificados y referencia inmutable de la imagen. Cierra explícitamente las conexiones SQLite antes de reiniciar.
+3. Reinicia IdP y visor, comprueba salud y restablece el acceso anterior. Un fallo de recuperación mantiene el visor en mantenimiento.
+4. Cifra la copia con restic, verifica el repositorio y solo entonces aplica `forget --keep-last 7 --group-by '' --prune` en el repositorio exclusivo de la beta.
+5. Publica resultado y fecha de éxito en las métricas. Un fallo no reemplaza la fecha del último respaldo correcto.
+
+El respaldo interrumpe brevemente las sesiones; después de reiniciar el visor se requiere autenticación. La contraseña de restic tiene una copia privada fuera del servidor y fuera del repositorio de respaldos. Perderla hace irrecuperables las copias. Las copias antiguas pueden conservar la configuración de conectores retirada; los respaldos nuevos de esquema 7 incluyen únicamente la configuración OIDC del visor y los archivos privados necesarios para su identidad y operación.
+
+El almacenamiento de respaldos está en otro disco del mismo host. Protege frente a la pérdida del volumen de aplicación, pero **no constituye una copia fuera del sitio ni una garantía ante la pérdida completa del host y sus discos**. La beta tiene una instancia; un fallo del nodo interrumpe el servicio.
+
+Consulta la [API de backup de SQLite](https://sqlite.org/backup.html), [`pg_dump`](https://www.postgresql.org/docs/17/app-pgdump.html) y la [política de retención de restic](https://restic.readthedocs.io/en/stable/060_forget.html). No copies únicamente el archivo SQLite mientras el escritor esté abierto ni borres WAL/SHM para forzar la recuperación.
+
+## Restauración y rollback
+
+Para una restauración, cierra primero el acceso y conserva el estado existente. Verifica y descifra una copia elegida, recupera SQLite, la base del IdP, configuraciones y claves, y utiliza una imagen compatible con el esquema. Conserva permisos y propietarios: UID `10001` para mddiff, UID del servicio para cada archivo privado del IdP y PostgreSQL. Verifica login con identidades recuperadas y el trabajo exacto de dos usuarios antes de reabrir.
+
+El manifiesto de la entrega fija commit, identidad de imagen y esquema SQLite. Antes de actualizar, conserva la imagen conocida y un checkpoint coherente. Un despliegue fallido debe poder volver a esa imagen y su configuración sin borrar el directorio de trabajo.
+
+El ensayo del 2026-10-28 recuperó la imagen verificada tras un candidato que no arranca, con almacenamiento de esquema 3. No demostró un cambio entre esquemas. El ensayo del 2026-10-29 migró de 3 a 4, restauró únicamente la aplicación y su checkpoint compatible con 3 y repitió la migración a 4, preservando IdP y PostgreSQL. Esto no es una conversión de 4 a 3 en el mismo archivo ni admite reducir manualmente `user_version`.
+
+Un binario anterior no debe abrir datos de un esquema posterior; la entrega vigente usa SQLite 7. Restaurar un checkpoint vuelve al estado de la copia y no conserva escrituras posteriores. Mantén mantenimiento durante la actualización y sus verificaciones. Después de reabrir el servicio y aceptar escrituras públicas, no recuperes el checkpoint anterior como un rollback rutinario: perdería esas escrituras.
+
+Un rollback limitado al visor debe conservar el IdP y su PostgreSQL vigentes. Restaurarlos desde una copia anterior podría revertir cambios de contraseña o sesiones que ocurrieron durante el mantenimiento de la aplicación. Una recuperación completa del IdP exige cerrar también sus escrituras y revisar esa consecuencia.
+
+## Observabilidad sin documentos
+
+| Señal | Verificación |
+| --- | --- |
+| Salud y acceso público | Sondas HTTPS con TLS verificado: salud `204`, discovery del IdP `200`, API/MCP anónimos `401` y administración pública `404`. |
+| Consumo | Estado, memoria, límite, CPU, reinicios y OOM por contenedor; espacio disponible del volumen y del host. |
+| Respaldo y TLS | Último resultado y antigüedad del respaldo; fecha de caducidad del certificado de origen y timer de renovación. |
+| Errores y cuotas | Conteos `429` y `5xx` y latencia p95 sobre las últimas 1000 respuestas del proxy. Es una ventana reciente, no un contador histórico completo ni una medida de disponibilidad. |
+| Logs | Solo fecha, categoría fija de ruta, estado, duración y bytes; sin URI, query, IP, headers, cookies, tokens o Markdown. Rotación limitada. |
+
+Un dashboard privado reúne estas señales. No se configuraron envíos de alertas a personas. Revisa un respaldo de más de 26 horas, un certificado con menos de 14 días, contenedores caídos, memoria sostenida cerca del límite y espacio físico insuficiente. La salud del visor no sustituye una prueba de login ni comprueba continuamente al IdP.
+
+## Evidencia de instalación
+
+### Instalación histórica del 2026-10-28
+
+Verificado el **2026-10-28** en Linux amd64, con la aplicación del commit `2dcede7` y esquema SQLite 3. La instalación y las credenciales permanecen en el runbook privado; no se incorporaron al repo ni a la imagen.
+
+| Comprobación | Resultado |
+| --- | --- |
+| HTTPS y admisión | HTTP redirige a HTTPS; dos invitados acceden y una cuenta sin rol queda bloqueada. Cookies seguras, API/MCP anónimos `401`, administración pública `404` y cinco sondas HTTPS correctas. |
+| Cliente real | Codex CLI 0.163.0 completó OAuth PKCE, descubrimiento de herramientas, propuestas, SSE y rechazo de revisiones obsoletas con dos cuentas; cero turnos de modelo. Chrome verificó login, comparación, contenido exacto, importación y destino personal, sin errores JavaScript. |
+| Recuperación | Restic verificó todos los datos y restauró el respaldo cifrado. Después de borrar ambos trabajos sintéticos se recuperaron sus pares exactos, cuentas y claves de firma del IdP. La clave externa recuperada descifró un canario AES-GCM. |
+| Ciclo de vida | Reiniciar el contenedor de sistema conserva los trabajos. Un candidato que falla al arrancar vuelve a la imagen verificada; una copia con esquema futuro 4 se rechaza sin reducir el número de esquema ni modificar los datos activos. |
+| Operación | Timer diario, cifrado y límite de siete copias, métricas privadas, revisión de logs y renovación del certificado de origen comprobados. Una invitación nueva obligó a cambiar contraseña y abrió un espacio vacío. Las cuatro cuentas de prueba se retiraron. |
+
+El respaldo coherente completo medido tardó aproximadamente **25 segundos**, incluidos reinicio y verificación; no es una garantía para volúmenes mayores. La primera ejecución detectó una conexión SQLite sin cerrar: se corrigió antes de publicar, y los respaldos y la restauración posteriores pasaron.
+
+Las suites de código y capacidad previas están en [S13](capacity-validation.md); sus diez sesiones sintéticas no equivalen a una prueba prolongada de diez navegadores a través de internet. La evidencia del 2026-10-28 no valida login social, proveedores personales reales, alta disponibilidad ni cambios entre esquemas.
+
+### Actualización del 2026-10-29
+
+La beta ejecuta el commit `6bfccea841530e4cf8a49fc5ab7b1e5d9f670070`, con esquema SQLite 4. Esta actualización incorpora el selector y la procedencia de orígenes, la conversión ADF de Jira y el vínculo entre sesión y eventos de [S11](coordination.md). [#11](https://github.com/joalceco/mddiff/issues/11) y [#12](https://github.com/joalceco/mddiff/issues/12) están cerrados.
+
+| Comprobación | Resultado registrado |
+| --- | --- |
+| CI | [Corrida 40904080796](https://github.com/joalceco/mddiff/actions/runs/40904080796): jobs `check` y `container` correctos, incluidas 70 pruebas Rust, regresiones y capacidad de diez usuarios sintéticos. |
+| Migración y rollback | SQLite 3→4, rollback de aplicación a su checkpoint de esquema 3 y nueva migración a 4 correctos. Los hashes de los registros anteriores coinciden. Keycloak y PostgreSQL permanecieron vigentes durante el ensayo. |
+| Cliente público | Codex real completó OAuth, API/MCP, procedencia, SSE y conflictos de revisión por HTTPS público con dos cuentas sintéticas y cero turnos de modelo sobre la imagen publicada `6bfccea`. |
+| Operación | Cinco sondas públicas correctas, métricas comprobadas y timer de respaldos activo. Se conserva la política de hasta siete copias cifradas exitosas. |
+| Persistencia nueva | Recuperación del trabajo nuevo y sus metadatos verificada en `6bfccea`. La conservación de registros previos durante la migración también está verificada. |
+
+La limpieza posterior borró los documentos sintéticos y retiró únicamente las tres cuentas creadas para esta prueba; el propietario permaneció intacto. El respaldo final cifrado se recuperó desde restic y se verificaron manifiesto, commit, imagen, esquema 4 e integridad SQLite. Se retiraron las copias temporales del checkpoint; las copias cifradas y los datos vigentes se conservaron. El monitor confirmó las cinco sondas HTTPS y la recolección de métricas con muestras actuales.
+
+La lectura real de [Jira #10](https://github.com/joalceco/mddiff/issues/10), la integración personal real de Memos y Google/GitHub siguen pendientes. [#17](https://github.com/joalceco/mddiff/issues/17) bloquea habilitar Sharing para otras cuentas de Atlassian. Los resultados de proveedores sintéticos no sustituyen esas validaciones, y la documentación pública no contiene accesos, secretos ni documentos privados.
+
+### Activación Jira del 2026-11-04
+
+Se configuró el secreto OAuth mediante el montaje privado existente y se recreó solo el visor, conservando el binario y esquema vigentes. Pasaron conexión personal y captura Jira reales, comparación mediante Codex/MCP, conservación del original/procedencia, aislamiento y rechazo de revisión antigua. Se borraron los documentos de prueba, se desconectó su token y se retiraron las cuentas desechables antes del respaldo. El trabajo del propietario y los contenedores del IdP/PostgreSQL se conservaron. La app Jira sigue privada y la distribución requiere #17.
+
+### SQLite 6 y barrera activa del 2026-11-05
+
+Con autorización explícita, se activó `0e1c4a3` y se migró SQLite 4→6 bajo mantenimiento. La autoridad externa queda montada de solo lectura y el checkpoint usa el protocolo 1. Se conservaron trabajo, conexiones cifradas, secretos y contenedores de identidad; no había documentos en la base migrada. Se corrigió el permiso legado del manifiesto a `0600` antes de terminar su publicación, sin repetir la migración.
+
+El primer ciclo manual verificó ocho checkpoints mediante recuperación protegida: estado actual y siete respaldos. No encontró documentos, cuentas, pendientes ni elementos sin clasificar. Se retiraron los temporales y se reabrió el lector. VictoriaMetrics recibió las seis métricas agregadas esperadas. El respaldo posterior pasó integridad y retención; una de las siete copias contiene esquema 6 y las otras seis conservan esquema 4.
+
+Sobre la imagen publicada, dos identidades nuevas completaron login y Codex OAuth/MCP por HTTPS, lectura del trabajo, propuestas privadas, SSE y rechazo de revisión obsoleta; una tercera sin invitación recibió rechazo. Pasaron también las sondas de salud, autenticación y administración. No se usaron turnos de modelo. Se borró el trabajo sintético mediante la API y se retiraron únicamente esas tres identidades.
+
+El timer de privacidad sigue sin instalar: habilitar futuras eliminaciones sin confirmación por caso requiere autorización separada. La recuperación protegida de checkpoints no sustituye la restauración completa en frío del respaldo nuevo, todavía pendiente. Sharing continúa deshabilitado. Consulta [el alcance actual y los pendientes](agent-comparisons.md).
+
+
+### Actualización del 2026-11-09
+
+La beta por invitación usa `d76c07f41efce8d92279f9c09e3cf94c7391aa4f` con SQLite 7. Se retiraron los conectores y su configuración: el agente envía ambos Markdown con `submit_comparison` o `PUT /api/work`. Se conservan Keycloak, espacios privados, entradas manuales, lector local y solo el último par persistente. Google/GitHub sigue aplazado. [#18](https://github.com/joalceco/mddiff/issues/18) sustituye los pendientes de conectores; #17 se cerró como no planificado por este cambio de alcance.
+
+La imagen Linux amd64 se construyó únicamente con archivos públicos auditados. La activación cerró el lector, detuvo el escritor y migró una copia separada sin red. Antes de promoverla se compararon las filas de documentos, propietarios, revisiones y metadatos de entrada; no cambiaron. Pasaron salud y checkpoint real por señal. Se preservaron OIDC y los contenedores de identidad durante la promoción. Los binarios anteriores no abren SQLite 7; no se reduce `user_version`.
+
+El respaldo cifrado nuevo pasó integridad y retención de siete copias. Su SQLite contiene únicamente `current_work`, y el directorio de secretos del visor contiene solo OIDC. No incorpora credenciales de conectores. Los respaldos anteriores pueden conservar datos y configuración hasta salir de la retención.
+
+Dos invitados nuevos completaron Codex real por OAuth y MCP sobre el HTTPS público: envío de ambos textos desde espacios vacíos, Unicode/CRLF exactos, coincidencia entre API/visor/SSE, aislamiento y rechazo de revisión obsoleta. Una cuenta sin rol recibió denegación; las API/MCP anónimas devolvieron `401` y la administración pública, `404`. Cero turnos de modelo. Se borraron los trabajos mediante la API autenticada y se retiraron las tres identidades de prueba.
+
+Se descifró el respaldo real y se probaron los helpers instalados de rollback de aplicación y restauración completa en un clon sin interfaces externas ni ruta por defecto. Pasaron filas exactas, ausencia de secretos de conectores, claves de firma y propietario del IdP preservados, y creación/retiro de invitados sintéticos. El rollback conservó los contenedores de identidad del clon. Se adaptaron exclusivamente las URLs y la política SSL de sus realms a loopback; este ensayo no prueba TLS público. El clon y los archivos temporales se retiraron; producción mantuvo su configuración y salud.
+
+Se retiraron la credencial exclusiva del operador, los ejecutores de privacidad no habilitados, las credenciales/configuración de conectores y las copias temporales previas. El bind antiguo no pudo desmontarse desde el contenedor sin privilegios; un respaldo final y un reinicio controlado completaron su retiro. El visor y el IdP recuperaron salud, y Codex repitió la prueba pública del par con identidades nuevas. Respaldo diario, renovación TLS y recolección de métricas siguen activos; aplicación, Keycloak y PostgreSQL conservaron sus límites y no presentaron OOM.
+
+El [CI de la imagen desplegada](https://github.com/joalceco/mddiff/actions/runs/42641193821) aprobó código y contenedor, incluida capacidad de diez usuarios. La comprobación de credenciales y datos privados se realiza antes de publicar documentación. La instalación, los secretos y los recibos completos permanecen en el runbook privado.
+
+### Actualización del 2026-11-12
+
+La beta ejecuta `ff66bd2e10a38b2ebef7847089766f395ffb9763`, imagen Linux amd64 `sha256:0ea2db4067ce57eca5d8a5b0b1c4d06cb8aa8ef831b3adb65daafa7764dd0ee0`, con SQLite 7. [#19](https://github.com/joalceco/mddiff/issues/19) añade enlaces temporales de solo lectura por `create_review_link` y `POST /api/review-links`; el lector local conserva sus contratos.
+
+El agente autenticado crea el enlace para la revisión confirmada. Su vigencia máxima es de 3600 segundos y termina antes si se reemplaza/borra el trabajo o se reinicia el visor. El respaldo diario reinicia la aplicación, por lo que también invalida estos enlaces. La capacidad autoriza únicamente ese par y no permite editar, consultar otro propietario o usar las API/MCP protegidas. Retirar el rol del propietario no revoca por sí solo un enlace ya emitido: para retirarlo antes del vencimiento, cambia/borra su trabajo o reinicia el visor.
+
+El token aleatorio viaja en el fragmento de la URL y luego en un header exclusivo; no en ruta o query. El registro en memoria conserva solo su hash, identidad, revisión y plazo monotónico, sin otra copia de Markdown ni historial. Admite hasta 16 enlaces por usuario/revisión y 256 globales. Quien posea un enlace puede leer el par durante su vigencia y guardar lo que ya recibió; no se debe publicar fuera de la revisión solicitada.
+
+La activación cerró el lector bajo el bloqueo de respaldos, detuvo exclusivamente la aplicación y cambió su imagen sin migrar la base. Se compararon las filas y revisiones exactas antes y después, se verificó un checkpoint real por señal y se preservaron configuración OIDC y contenedores de identidad. Pasaron respaldos cifrados previos y posteriores, con siete copias verificadas antes de reabrir. El rollback de imagen compatible con esquema 7 quedó disponible; no se repitió la restauración completa del 2026-11-09 porque no cambiaron el esquema ni sus helpers.
+
+El [CI del código desplegado](https://github.com/joalceco/mddiff/actions/runs/43254954605) aprobó ambos jobs: 55 pruebas Rust, formato, Clippy, lector/MCP local, separación de modos, identidad, persistencia, navegador, API/MCP, coordinación y diez usuarios sintéticos. Incluye caducidad con reloj de prueba, cambio de capacidad en una pestaña existente, aislamiento, cuotas, rechazo de revisiones obsoletas y retiro automático del contenido. Docker local no pudo iniciar Keycloak por memoria insuficiente de la VM de 2 GiB; la validación completa usa el host de CI con capacidad suficiente.
+
+Codex real completó OAuth y MCP sobre el HTTPS público con dos invitados nuevos, emitió enlaces de 3600 segundos y comprobó lectura sin sesión, contenido exacto, ETag, rechazo de escritura y aislamiento. Cero turnos de modelo. El navegador integrado abrió un enlace sin login, mostró ambos documentos y retiró el contenido automáticamente tras el borrado autenticado. Se eliminaron ambos trabajos sintéticos y las tres identidades creadas para la prueba; no se reemplazaron documentos de cuentas existentes.
+
+La habilidad global, AGENTS y la guía local usan ahora `get_current_work` → `submit_comparison` → `create_review_link` → apertura del `viewer_url`. Reabrir el par vigente solo requiere lectura y creación del enlace. Se validaron la habilidad y la conservación de la configuración existente; los chats abiertos pueden necesitar una sesión nueva para descubrir la herramienta añadida. Los enlaces reales, credenciales y recibos permanecen fuera del repositorio. Google/GitHub continúa pendiente y el PR #16 permanece como borrador.

@@ -23,15 +23,39 @@ let busy = false;
 let openTimer = null;
 let inputVersion = 0;
 let pathsDirty = false;
+let authentication = null;
+let hosted = false;
+const reviewMode = window.location.pathname === "/review";
+const reviewToken = reviewMode ? window.location.hash.slice(1) : null;
+let reviewStopped = false;
+let reviewBusy = false;
+let reviewEtag = null;
+let reviewPoll = null;
+let reviewExpiry = null;
+let events = null;
+let reconnectTimer = null;
+let textDraft = null;
+let importVersion = 0;
+const fileRevisions = { base: null, candidate: null };
+const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+function pendingTextImport() {
+  return Boolean(textDraft && textDraft.version !== textDraft.savedVersion);
+}
 
-async function request(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+async function request(path, body, method = "POST") {
+  const response = await fetch(path, body === undefined ? (hosted && authentication && path.startsWith("/api/")
+    ? { headers: { "X-CSRF-Token": authentication.csrf_token } } : {}) : {
+    method, headers: { "Content-Type": "application/json", ...(authentication ? { "X-CSRF-Token": authentication.csrf_token } : {}) }, body: JSON.stringify(body),
   });
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = null; }
-  if (!response.ok) throw new Error(data?.error || data?.message || text || `Error ${response.status}`);
+  if (!response.ok) {
+    if (hosted && [401, 403].includes(response.status)) endSession();
+    const error = new Error(data?.error || data?.message || text || `Error ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -42,14 +66,216 @@ function showError(error) {
 
 function setBusy(value) {
   busy = value;
-  for (const id of ["reload-button", "example-button"]) {
-    $(id).disabled = value;
-    $(id).setAttribute("aria-busy", String(value));
+  const working = value;
+  for (const id of ["reload-button", "example-button", "delete-work"]) {
+    $(id).disabled = working;
+    $(id).setAttribute("aria-busy", String(working));
   }
-  $("reload-button").disabled = value || !$("base-path").value.trim();
+  $("reload-button").disabled = working || !$("base-path").value.trim();
+  $("candidate-agent").disabled = working || !canImport("base") || pendingTextImport();
+  const pending = textDraft && !textDraft.conflict && textDraft.version !== textDraft.savedVersion && textDraft.version !== textDraft.failedVersion;
+  for (const side of ["base", "candidate"]) {
+    for (const control of ["paste", "upload", "file"]) {
+      $(`${side}-${control}`).disabled = working || !canImport(side) || Boolean(pending && !(side === textDraft.side && control === "paste"));
+    }
+  }
+}
+
+function canImport(side) {
+  return Boolean(hosted && authentication && session && (side === "base" || session.base_path));
+}
+
+function importStatus(side, message, invalid = false) {
+  const node = $(`${side}-import-status`);
+  node.textContent = message;
+  node.classList.toggle("invalid", invalid);
+}
+
+function resetImports() {
+  importVersion++;
+  clearTimeout(textDraft?.timer);
+  textDraft = null;
+  $("candidate-agent-help").hidden = true;
+  $("candidate-agent-url").textContent = "";
+  $("candidate-agent").setAttribute("aria-expanded", "false");
+  for (const side of ["base", "candidate"]) {
+    fileRevisions[side] = null;
+    $(`${side}-text`).value = "";
+    $(`${side}-text`).hidden = true;
+    $(`${side}-file`).value = "";
+    $(`${side}-paste`).textContent = "Pegar texto";
+    $(`${side}-paste`).setAttribute("aria-label", side === "base" ? "Pegar texto del original" : "Pegar texto de la propuesta");
+    $(`${side}-paste`).setAttribute("aria-expanded", "false");
+    importStatus(side, "Markdown UTF-8 · máx. 2 MiB");
+  }
+  setBusy(busy);
+}
+
+function importError(side, error) {
+  importStatus(side, error.message || String(error), true);
+  showError(error);
+}
+
+async function replaceSide(work, side, document, inputKind = "text") {
+  if (document.markdown.length > MAX_DOCUMENT_BYTES || new TextEncoder().encode(document.markdown).length > MAX_DOCUMENT_BYTES) {
+    throw new Error("Cada documento admite hasta 2 MiB en UTF-8.");
+  }
+  if (side === "candidate" && !work.base) throw new Error("Abre primero el original.");
+  if (side === "candidate") return request("/api/work", { expected_revision: work.revision, candidate: document, candidate_input: inputKind }, "PATCH");
+  return request("/api/work", {
+    expected_revision: work.revision,
+    base: document,
+    candidate: work.candidate,
+    base_input: inputKind,
+  }, "PUT");
+}
+
+async function openText(side) {
+  if (busy || !canImport(side)) return;
+  if (textDraft?.side === side) {
+    const draft = textDraft;
+    if (!draft.conflict && draft.version !== draft.savedVersion && draft.version !== draft.failedVersion) {
+      clearTimeout(draft.timer);
+      await saveText(draft);
+      if (textDraft !== draft || draft.version !== draft.savedVersion) return;
+    }
+    resetImports();
+    return;
+  }
+  resetImports();
+  const version = importVersion;
+  setBusy(true);
+  try {
+    const work = await request("/api/work");
+    if (!authentication || version !== importVersion) return;
+    textDraft = { side, work, value: "", version: 0, savedVersion: 0, failedVersion: -1, conflict: false };
+    const field = $(`${side}-text`);
+    field.hidden = false;
+    $(`${side}-paste`).textContent = "Cerrar texto";
+    $(`${side}-paste`).setAttribute("aria-label", side === "base" ? "Cerrar texto del original" : "Cerrar texto de la propuesta");
+    $(`${side}-paste`).setAttribute("aria-expanded", "true");
+    importStatus(side, "Se abre automáticamente al dejar de escribir.");
+    field.focus();
+  } catch (error) { if (version === importVersion && authentication) importError(side, error); }
+  finally { setBusy(false); }
+}
+
+function queueText(draft) {
+  clearTimeout(draft.timer);
+  draft.timer = setTimeout(() => saveText(draft), 350);
+  setBusy(busy);
+}
+
+async function saveText(draft) {
+  if (textDraft !== draft || !authentication || busy || draft.conflict
+    || draft.version === draft.savedVersion || draft.version === draft.failedVersion) return;
+  const version = draft.version;
+  const document = { label: draft.side === "base" ? "Original pegado.md" : "Propuesta pegada.md", markdown: draft.value };
+  setBusy(true);
+  importStatus(draft.side, "Abriendo y guardando…");
+  try {
+    const snapshot = await replaceSide(draft.work, draft.side, document);
+    if (textDraft !== draft || !authentication) return;
+    // Advance only our own revision; incoming SSE must not rebase an unsaved draft.
+    draft.work = { ...draft.work, [draft.side]: document, revision: snapshot.revision };
+    draft.savedVersion = version;
+    applySession(snapshot);
+    importStatus(draft.side, draft.version === version ? "Abierto y guardado." : "Pendiente de abrir…");
+  } catch (error) {
+    if (textDraft !== draft || !authentication) return;
+    draft.failedVersion = version;
+    if (error.status === 409) {
+      draft.conflict = true;
+      await refresh();
+      if (textDraft !== draft || !authentication) return;
+      error.message = "El trabajo cambió. Conserva tu texto y cierra y vuelve a abrir este campo antes de reintentar.";
+    }
+    importError(draft.side, error);
+  } finally {
+    setBusy(false);
+    if (textDraft === draft && draft.version !== version && !draft.conflict) queueText(draft);
+  }
+}
+
+async function openUpload(side) {
+  const input = $(`${side}-file`);
+  const file = input.files[0];
+  input.value = "";
+  if (!file || busy || !canImport(side)) return;
+  const expected = fileRevisions[side] ?? session.revision;
+  fileRevisions[side] = null;
+  resetImports();
+  const version = importVersion;
+  setBusy(true);
+  importStatus(side, "Leyendo Markdown…");
+  try {
+    if (!/\.(md|markdown)$/i.test(file.name)) throw new Error("Elige un archivo .md o .markdown.");
+    if (file.size > MAX_DOCUMENT_BYTES) throw new Error("Cada documento admite hasta 2 MiB.");
+    const label = fileName(file.name);
+    if (!label.trim() || new TextEncoder().encode(label).length > 255 || /[\u0000-\u001f\u007f-\u009f]/.test(label)) {
+      throw new Error("El nombre requiere entre 1 y 255 bytes, sin caracteres de control.");
+    }
+    const work = await request("/api/work");
+    if (!authentication || version !== importVersion) return;
+    if (work.revision !== expected) {
+      const error = new Error("El trabajo cambió mientras elegías el archivo. Vuelve a seleccionarlo para reintentar.");
+      error.status = 409;
+      throw error;
+    }
+    let bytes;
+    try { bytes = await file.arrayBuffer(); }
+    catch { throw new Error("No se pudo leer el archivo. Vuelve a seleccionarlo."); }
+    let markdown;
+    try {
+      // Keep BOM and line endings; reject malformed UTF-8 instead of replacing bytes.
+      markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch { throw new Error("El archivo no contiene texto UTF-8 válido."); }
+    if (!authentication || version !== importVersion) return;
+    const snapshot = await replaceSide(work, side, { label, markdown }, "file");
+    if (!authentication || version !== importVersion) return;
+    applySession(snapshot);
+    importStatus(side, "Abierto y guardado.");
+  } catch (error) {
+    if (version !== importVersion || !authentication) return;
+    if (error.status === 409) await refresh();
+    if (version !== importVersion || !authentication) return;
+    importError(side, error);
+  } finally { setBusy(false); }
+}
+
+for (const side of ["base", "candidate"]) {
+  $(`${side}-paste`).addEventListener("click", () => openText(side));
+  $(`${side}-upload`).addEventListener("click", () => {
+    if (busy || !canImport(side)) return;
+    fileRevisions[side] = session.revision;
+    $(`${side}-file`).click();
+  });
+  $(`${side}-file`).addEventListener("change", () => openUpload(side));
+  const field = $(`${side}-text`);
+  const changed = (value) => {
+    if (textDraft?.side !== side) return;
+    textDraft.value = value;
+    textDraft.version++;
+    if (!textDraft.conflict) {
+      importStatus(side, "Pendiente de abrir…");
+      queueText(textDraft);
+    }
+  };
+  field.addEventListener("input", (event) => { if (!event.isComposing) changed(field.value); });
+  field.addEventListener("compositionend", () => changed(field.value));
+  field.addEventListener("paste", (event) => {
+    // A complete paste preserves clipboard CRLF even though textarea.value normalizes it.
+    if (event.clipboardData?.types.includes("text/plain") && field.selectionStart === 0 && field.selectionEnd === field.value.length) {
+      event.preventDefault();
+      const value = event.clipboardData.getData("text/plain");
+      field.value = value;
+      changed(value);
+    }
+  });
 }
 
 async function openFiles(example = false) {
+  if (hosted) return;
   clearTimeout(openTimer);
   openTimer = null;
   if (busy) return;
@@ -94,11 +320,53 @@ function applySession(data) {
 }
 
 async function refresh() {
-  try { applySession(await request("/api/state")); }
-  catch (error) { showError(error); }
+  const previous = authentication;
+  try {
+    const data = await request("/api/state");
+    if (hosted) {
+      if (!previous || authentication !== previous) return;
+    }
+    applySession(data);
+  }
+  catch (error) { if (!hosted || authentication === previous) showError(error); }
 }
 
 function fileName(path) { return path?.split(/[\\/]/).pop() || ""; }
+
+function sourceTime(node, value, prefix, kind) {
+  const date = new Date(typeof value === "number" ? value * 1000 : value);
+  if ((typeof value !== "number" && typeof value !== "string") || Number.isNaN(date.valueOf())) return;
+  const time = document.createElement("time");
+  time.className = `source-${kind}`;
+  time.dateTime = date.toISOString();
+  time.textContent = `${prefix} ${new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short" }).format(date)}`;
+  node.append(time);
+}
+
+function renderManualSource(side) {
+  const node = $(`${side}-provenance`);
+  const input = session?.[`${side}_input`];
+  node.replaceChildren();
+  node.hidden = !hosted || !authentication || !session?.[`${side}_path`] || !input;
+  if (node.hidden) return;
+  const labels = { text: "Texto pegado", file: "Archivo Markdown", agent: "Agente · MCP", api: "API" };
+  const label = document.createElement("span");
+  label.textContent = labels[input.kind] || "Markdown importado";
+  node.append(label);
+  sourceTime(node, input.captured_at, "Recibido", "received");
+}
+
+function renderInputs() {
+  renderManualSource("base");
+  renderManualSource("candidate");
+}
+
+$("candidate-agent").addEventListener("click", () => {
+  const help = $("candidate-agent-help");
+  help.hidden = !help.hidden;
+  $("candidate-agent").setAttribute("aria-expanded", String(!help.hidden));
+  $("candidate-agent-url").textContent = `${window.location.origin}/mcp`;
+});
 
 function cell(block, status) {
   const node = document.createElement("div");
@@ -155,6 +423,14 @@ function render() {
   $("empty").hidden = hasDocument;
   $("review-bar").hidden = !hasDocument;
   $("document-view").hidden = !hasDocument;
+  $("delete-work").hidden = !hosted || !authentication || !hasDocument;
+  if (hosted) {
+    $("pane-headers").hidden = !(authentication || (reviewMode && !reviewStopped && session));
+    $("base-path").hidden = $("candidate-path").hidden = true;
+  }
+  for (const side of ["base", "candidate"]) {
+    $(`${side}-source-actions`).hidden = $(`${side}-import-status`).hidden = !hosted || !authentication;
+  }
   $("document-view").classList.toggle("reading", !isDiff);
   $("rows").classList.toggle("source", format === "source");
   setBusy(busy);
@@ -163,9 +439,21 @@ function render() {
     $(id).classList.toggle(["reading-tab", "diff-tab"].includes(id) ? "active" : "selected", selected);
     $(id).setAttribute("aria-pressed", String(selected));
   }
-  $("base-name").textContent = fileName(session?.base_path) || "Sin archivo";
-  $("candidate-name").textContent = fileName(session?.candidate_path) || "Sin archivo";
-  if (!hasDocument) return;
+  $("base-name").textContent = (hosted ? session?.base_path : fileName(session?.base_path)) || "Sin archivo";
+  $("candidate-name").textContent = (hosted ? session?.candidate_path : fileName(session?.candidate_path)) || "Sin archivo";
+  renderInputs();
+  if (!hasDocument) {
+    changes = [];
+    changeIndex = -1;
+    $("rows").replaceChildren();
+    $("review-summary").replaceChildren();
+    $("change-badge").hidden = true;
+    if (hosted && authentication) {
+      $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
+      $("timing").textContent = "Espacio privado";
+    }
+    return;
+  }
   const fragment = document.createDocumentFragment();
   let rowGroup;
   changes = [];
@@ -233,6 +521,19 @@ for (const id of ["base-path", "candidate-path"]) {
 }
 $("reload-button").addEventListener("click", () => openFiles());
 $("example-button").addEventListener("click", () => openFiles(true));
+$("delete-work").addEventListener("click", async () => {
+  if (!hosted || !authentication || busy || !session?.comparison) return;
+  const expectedRevision = session.revision;
+  if (!window.confirm("¿Borrar el original y la propuesta actuales?\nEsta acción vacía tu trabajo. No se puede deshacer desde mddiff.")) return;
+  resetImports();
+  setBusy(true);
+  try { applySession(await request("/api/work", { expected_revision: expectedRevision }, "DELETE")); }
+  catch (error) {
+    if (error.status === 409) await refresh();
+    showError(error);
+  }
+  finally { setBusy(false); }
+});
 $("reading-tab").addEventListener("click", () => { if (view === "reading") return; view = "reading"; render(); });
 $("diff-tab").addEventListener("click", () => { if (view === "diff") return; view = "diff"; render(); });
 $("rendered-tab").addEventListener("click", () => { if (format === "rendered") return; format = "rendered"; render(); });
@@ -240,11 +541,179 @@ $("source-tab").addEventListener("click", () => { if (format === "source") retur
 $("previous-change").addEventListener("click", () => navigateChange(-1));
 $("next-change").addEventListener("click", () => navigateChange(1));
 document.addEventListener("keydown", (event) => {
-  if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,textarea,[contenteditable=true]")) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input,select,textarea,[contenteditable=true]")) return;
   if (event.key === "j" || event.key === "k") { event.preventDefault(); navigateChange(event.key === "j" ? 1 : -1); }
 });
 
-const events = new EventSource("/api/events");
-events.onopen = () => { acceptedRevision = -1; $("connection").textContent = "Conectado"; $("connection").classList.add("connected"); };
-events.addEventListener("revision", () => refresh());
-events.onerror = () => { $("connection").textContent = "Reconectando…"; $("connection").classList.remove("connected"); };
+function hostedView(title, description) {
+  $("pane-headers").hidden = !(authentication || (reviewMode && !reviewStopped && session));
+  $("reload-button").hidden = true;
+  $("example-button").hidden = true;
+  $("empty").querySelector("ol").hidden = true;
+  $("empty").querySelector("h1").textContent = title;
+  $("empty").querySelector("p").textContent = description;
+  $("empty").querySelector(".small-label").textContent = "MDDIFF";
+  $("timing").textContent = "Espacio privado";
+}
+
+function endSession() {
+  authentication = null;
+  resetImports();
+  clearTimeout(reconnectTimer);
+  events?.close();
+  clearTimeout(openTimer);
+  session = null;
+  acceptedRevision = -1;
+  changes = [];
+  $("rows").replaceChildren();
+  $("base-path").value = $("candidate-path").value = "";
+  $("auth-user").textContent = "";
+  $("auth-user").hidden = $("logout-button").hidden = true;
+  $("login-button").hidden = false;
+  $("connection").textContent = "Sin sesión";
+  $("connection").classList.remove("connected");
+  $("document-status").textContent = "Inicia sesión para continuar.";
+  $("error").hidden = true;
+  render();
+  hostedView("Sesión finalizada", "Vuelve a iniciar sesión para acceder a tus documentos.");
+}
+
+async function sameWebSession(previous) {
+  try {
+    const response = await fetch("/auth/session");
+    const current = response.ok ? await response.json() : null;
+    return Boolean(previous && current && current.csrf_token === previous.csrf_token);
+  } catch { return false; }
+}
+
+function connectEvents() {
+  const source = new EventSource("/api/events");
+  events = source;
+  let ready = Promise.resolve(false);
+  source.onopen = () => {
+    ready = (async () => {
+      const previous = authentication;
+      if (hosted) {
+        const valid = await sameWebSession(previous);
+        if (events !== source || source.readyState !== EventSource.OPEN || authentication !== previous) return false;
+        if (!valid) { endSession(); return false; }
+      }
+      acceptedRevision = -1;
+      $("connection").textContent = "Conectado";
+      $("connection").classList.add("connected");
+      return true;
+    })();
+  };
+  source.addEventListener("revision", async (event) => {
+    if (!await ready || events !== source || source.readyState !== EventSource.OPEN) return;
+    if (hosted && (!authentication || event?.lastEventId !== authentication.csrf_token)) { endSession(); return; }
+    refresh();
+  });
+  source.onerror = async () => {
+    if (events !== source) return;
+    ready = Promise.resolve(false);
+    $("connection").textContent = "Reconectando…";
+    $("connection").classList.remove("connected");
+    if (hosted) {
+      source.close();
+      const previous = authentication;
+      const valid = await sameWebSession(previous);
+      if (events !== source || authentication !== previous) return;
+      if (!valid) endSession();
+      else reconnectTimer = setTimeout(() => { if (authentication === previous && events === source) connectEvents(); }, 3000);
+    }
+  };
+}
+
+$("login-button").addEventListener("click", () => { window.location.assign("/auth/login"); });
+$("logout-button").addEventListener("click", async () => {
+  $("logout-button").disabled = true;
+  try {
+    await request("/auth/logout", {});
+    endSession();
+  } catch (error) { showError(error); }
+  finally { $("logout-button").disabled = false; }
+});
+window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); });
+window.addEventListener("hashchange", () => { if (reviewMode) window.location.reload(); });
+document.addEventListener("click", (event) => {
+  const fragment = event.target.closest("a")?.getAttribute("href");
+  if (!reviewMode || !fragment?.startsWith("#")) return;
+  event.preventDefault();
+  try { document.getElementById(decodeURIComponent(fragment.slice(1)))?.scrollIntoView(); } catch {}
+});
+
+
+function endReview() {
+  reviewStopped = true;
+  clearTimeout(reviewPoll);
+  clearTimeout(reviewExpiry);
+  session = null;
+  acceptedRevision = -1;
+  changes = [];
+  $("rows").replaceChildren();
+  $("base-path").value = $("candidate-path").value = "";
+  render();
+  hostedView("Enlace no disponible", "El enlace caducó o dejó de estar disponible. Pide otro al agente.");
+  $("connection").textContent = "Enlace finalizado";
+  $("connection").classList.remove("connected");
+  $("document-status").textContent = "La revisión temporal ya no está disponible.";
+}
+
+async function refreshReview() {
+  if (reviewBusy || reviewStopped) return;
+  reviewBusy = true;
+  clearTimeout(reviewPoll);
+  try {
+    const response = await fetch("/api/review", {
+      credentials: "omit", cache: "no-store", redirect: "error",
+      headers: { "X-Mddiff-Review": reviewToken, ...(reviewEtag ? { "If-None-Match": reviewEtag } : {}) },
+    });
+    if (reviewStopped) return;
+    if (!response.ok && response.status !== 304) { endReview(); return; }
+    const remaining = Number(response.headers.get("x-mddiff-review-remaining"));
+    if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 3600) { endReview(); return; }
+    clearTimeout(reviewExpiry);
+    reviewExpiry = setTimeout(endReview, remaining * 1000);
+    if (response.status !== 304) {
+      const snapshot = await response.json();
+      if (reviewStopped) return;
+      reviewEtag = response.headers.get("ETag");
+      applySession(snapshot);
+    }
+    $("pane-headers").hidden = false;
+    $("connection").textContent = "Revisión temporal · solo lectura";
+    $("connection").classList.add("connected");
+    $("document-status").textContent = "Este enlace no permite editar ni borrar el trabajo.";
+    reviewPoll = setTimeout(refreshReview, 15000);
+  } catch { endReview(); }
+  finally { reviewBusy = false; }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (reviewMode && document.visibilityState === "visible") refreshReview();
+});
+
+async function start() {
+  if (reviewMode) {
+    hosted = true;
+    hostedView("Revisión temporal", "Abriendo el documento…");
+    $("login-button").hidden = $("logout-button").hidden = true;
+    if (!/^[A-Za-z0-9_-]{43}$/.test(reviewToken)) { endReview(); return; }
+    await refreshReview();
+    return;
+  }
+  try {
+    const response = await fetch("/auth/session");
+    if (response.status === 404) { connectEvents(); return; }
+    hosted = true;
+    if (!response.ok) { endSession(); return; }
+    authentication = await response.json();
+    $("auth-user").textContent = authentication.user_label;
+    $("auth-user").hidden = $("logout-button").hidden = false;
+    hostedView("Tu espacio privado", "Pide a tu agente que envíe el previo y el actual, o carga los Markdown desde sus cabeceras.");
+    $("document-status").textContent = "Solo tú puedes acceder a este espacio.";
+    connectEvents();
+  } catch (error) { showError(error); }
+}
+start();

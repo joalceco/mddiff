@@ -1,0 +1,11 @@
+{
+  "name": "mddiff-browser-tests",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node hosted-imports.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
